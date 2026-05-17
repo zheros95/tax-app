@@ -794,12 +794,14 @@ class App {
                     },
                     {
                         id: 'price_transfer',
-                        title: '얼마에 양도하셨나요?',
-                        subtitle: '양수인에게 받은 실제 금액을 입력해주세요. 단위는 만원입니다.',
+                        title: (inputs) => inputs.isJointOwnership ? '부동산 전체를 얼마에 양도하셨나요?' : '얼마에 양도하셨나요?',
+                        subtitle: (inputs) => inputs.isJointOwnership 
+                            ? '계약서상 부동산 전체의 실제 양도가액을 입력해주세요. (세금은 50:50 지분으로 알아서 나누어 계산합니다. 단위: 만원)'
+                            : '양수인에게 받은 실제 금액을 입력해주세요. 단위는 만원입니다.',
                         type: 'currency_group',
                         condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real',
-                        fields: [
-                            { id: 'transferPrice', label: '양도가액' }
+                        fields: (inputs) => [
+                            { id: 'transferPrice', label: inputs.isJointOwnership ? '부동산 전체 양도가액' : '양도가액' }
                         ]
                     },
                     {
@@ -815,8 +817,10 @@ class App {
                     },
                     {
                         id: 'price_acquisition_detail',
-                        title: '취득에 들어간 비용을 입력해주세요.',
-                        subtitle: '순수 취득가액 다음에 취득세 등(등기비용 포함), 중개수수료, 법무사 수수료를 입력합니다. 비워두면 0원으로 처리합니다. 단위는 만원입니다.',
+                        title: (inputs) => inputs.isJointOwnership ? '부동산 전체의 취득 비용을 입력해주세요.' : '취득에 들어간 비용을 입력해주세요.',
+                        subtitle: (inputs) => inputs.isJointOwnership
+                            ? '계약서상 부동산 전체의 순수 취득가액과 취득세, 중개수수료 등을 입력해주세요. (세금은 50:50 지분으로 알아서 나누어 계산합니다. 단위: 만원)'
+                            : '순수 취득가액 다음에 취득세 등(등기비용 포함), 중개수수료, 법무사 수수료를 입력합니다. 비워두면 0원으로 처리합니다. 단위는 만원입니다.',
                         type: 'currency_group',
                         condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real',
                         fields: (inputs) => {
@@ -830,12 +834,15 @@ class App {
                             } else if (inputs.assetCategory === 'right' && inputs.rightType === 'ticket') {
                                 acqLabel = '분양권 매입가액(프리미엄 포함) + 불입액';
                             }
+                            if (inputs.isJointOwnership) {
+                                acqLabel = '부동산 전체 ' + acqLabel;
+                            }
                             return [
                                 { id: 'acqPrice_real', label: acqLabel },
-                                { id: 'acqTax', label: '취득세 등(등기비용 포함)' },
+                                { id: 'acqTax', label: inputs.isJointOwnership ? '전체 취득세 등(등기비용 포함)' : '취득세 등(등기비용 포함)' },
                                 {
                                     id: 'acqBrokerFee',
-                                    label: '취득 중개수수료',
+                                    label: inputs.isJointOwnership ? '전체 취득 중개수수료' : '취득 중개수수료',
                                     detailFields: [
                                         { id: 'acqBrokerBizNo', label: '사업자번호', type: 'text', placeholder: '예: 123-45-67890' },
                                         { id: 'acqBrokerPaidDate', label: '지급일', type: 'date' }
@@ -843,7 +850,7 @@ class App {
                                 },
                                 {
                                     id: 'acqLegalFee',
-                                    label: '법무사 수수료',
+                                    label: inputs.isJointOwnership ? '전체 법무사 수수료' : '법무사 수수료',
                                     detailFields: [
                                         { id: 'acqLegalBizNo', label: '법무사 사업자번호', type: 'text', placeholder: '예: 123-45-67890' },
                                         { id: 'acqLegalPaidDate', label: '지급일', type: 'date' }
@@ -854,23 +861,28 @@ class App {
                     },
                     {
                         id: 'price_expenses_detail',
-                        title: '집을 팔 때 들었던 비용과 큰 수리비용이 있었나요?',
-                        subtitle: '베란다 확장, 보일러 교체, 샷시 설치 등 뼈대를 고친 큰 수리비용(자본적 지출)만 세금에서 빼줍니다. (도배, 장판 교체 등 단순 수리비는 제외됩니다) 영수증이 있어야 인정됩니다. 단위는 만원입니다.',
+                        title: (inputs) => inputs.isJointOwnership ? '부동산 전체의 양도 비용과 큰 수리비용이 있었나요?' : '집을 팔 때 들었던 비용과 큰 수리비용이 있었나요?',
+                        subtitle: (inputs) => inputs.isJointOwnership
+                            ? '부동산 전체 기준의 필요경비(중개수수료, 세무대리비, 자본적 지출 수리비 등)를 입력해주세요. 지분별 안분은 자동 적용됩니다. 단위는 만원입니다.'
+                            : '베란다 확장, 보일러 교체, 샷시 설치 등 뼈대를 고친 큰 수리비용(자본적 지출)만 세금에서 빼줍니다. (도배, 장판 교체 등 단순 수리비는 제외됩니다) 영수증이 있어야 인정됩니다. 단위는 만원입니다.',
                         type: 'currency_group',
                         condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real',
-                        fields: [
+                        fields: (inputs) => [
                             {
                                 id: 'sellBrokerFee',
-                                label: '집 팔 때 낸 부동산 중개수수료',
+                                label: inputs.isJointOwnership ? '부동산 전체 양도 중개수수료' : '집 팔 때 낸 부동산 중개수수료',
                                 detailFields: [
                                     { id: 'sellBrokerBizNo', label: '사업자번호', type: 'text', placeholder: '예: 123-45-67890' },
                                     { id: 'sellBrokerPaidDate', label: '지급일', type: 'date' }
                                 ]
                             },
-                            { id: 'sellTaxFee', label: '세무사 등 신고대행 수수료' },
+                            { 
+                                id: 'sellTaxFee', 
+                                label: inputs.isJointOwnership ? '전체 세무사 등 신고대행 수수료' : '세무사 등 신고대행 수수료' 
+                            },
                             {
                                 id: 'capitalExpenditure',
-                                label: '큰 수리비용 (자본적 지출)',
+                                label: inputs.isJointOwnership ? '부동산 전체 큰 수리비용 (자본적 지출)' : '큰 수리비용 (자본적 지출)',
                                 detailFields: [
                                     { id: 'capitalExpenditureBizNo', label: '수리업체 사업자번호', type: 'text', placeholder: '예: 123-45-67890' },
                                     { id: 'capitalExpenditurePaidDate', label: '지급일', type: 'date' }
@@ -915,14 +927,16 @@ class App {
                     },
                     {
                         id: 'price_estimated',
-                        title: '기준시가를 입력해주세요.',
-                        subtitle: '취득가액 증빙이 없을 때의 단순 계산입니다. 단위는 만원입니다.',
+                        title: (inputs) => inputs.isJointOwnership ? '부동산 전체 기준의 금액들을 입력해주세요.' : '기준시가를 입력해주세요.',
+                        subtitle: (inputs) => inputs.isJointOwnership
+                            ? '부동산 전체의 양도가액과 기준시가를 입력해주세요. 지분 계산은 자동으로 이루어집니다. 단위는 만원입니다.'
+                            : '취득가액 증빙이 없을 때의 단순 계산입니다. 단위는 만원입니다.',
                         type: 'currency_group',
                         condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'estimated',
-                        fields: [
-                            { id: 'transferPrice', label: '양도가액' },
-                            { id: 'transferTaxBase', label: '양도 당시 기준시가' },
-                            { id: 'acquisitionTaxBase', label: '취득 당시 기준시가' }
+                        fields: (inputs) => [
+                            { id: 'transferPrice', label: inputs.isJointOwnership ? '부동산 전체 양도가액' : '양도가액' },
+                            { id: 'transferTaxBase', label: '양도 당시 기준시가 (전체 기준)' },
+                            { id: 'acquisitionTaxBase', label: '취득 당시 기준시가 (전체 기준)' }
                         ]
                     },
                     {
