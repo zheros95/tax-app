@@ -45,9 +45,9 @@ const TaxData = {
             documents: ['혼인관계증명서', '각 주택 취득일 증빙']
         },
         rental: {
-            label: '임대사업자·거주주택',
-            message: '임대사업자 또는 거주주택 전환 특례는 등록요건, 임대기간, 거주기간을 함께 확인해야 합니다.',
-            documents: ['임대사업자 등록자료', '임대차계약서']
+            label: '임대사업자·거주주택 특례',
+            message: '임대사업자 거주주택 비과세 특례(소득세법 시행령 §155⑳)는 양도일 현재 등록 유지, 의무임대기간 준수, 임대료 증액 5% 이하 제한을 모두 갖추어야 합니다. 요건 미충족 시 소급 추납 의무가 있으므로 양도 전 최종 확인이 필요합니다.',
+            documents: ['임대사업자 등록증 사본 (세무서 사업자등록 + 지자체 임대사업자등록)', '임대차계약서 전체 이력', '임대료 증액 내역 확인자료', '임차인 주민등록표 등본']
         },
         winwin: {
             label: '상생임대',
@@ -64,6 +64,12 @@ const TaxData = {
             message: '입주권과 재건축 자산은 일반 주택과 달리 주택 수와 양도차익 계산 방식이 달라집니다.',
             documents: ['관리처분계획 인가 관련 서류', '권리가액 산정자료'],
             severe: true
+        },
+        cash_settlement: {
+            label: '재개발·재건축 현금청산',
+            message: '현금청산은 기존 부동산이 사실상 양도되는 것으로 취급됩니다. 양도가액은 수령한 현금청산금이며, 취득일부터 대금청산일까지의 기간이 보유기간이 됩니다. 1세대 1주택 요건 충족 시 비과세가 가능합니다.',
+            documents: ['관리처분계획 인가서', '현금청산금 산정 내역서', '대금청산 확인서류'],
+            severe: false
         },
         unsold_new: {
             label: '준공 후 미분양·소형신축 특례',
@@ -167,7 +173,29 @@ class TaxCalculator {
             acquisitionCost = inputs.acquisitionPrice;
         }
 
-        let capitalGains = transferPrice - acquisitionCost - necessaryExpenses;
+        // ── 재개발 원조합원 분리 계산 ──
+        let redevCalc = null;
+        const isRedevOriginal = inputs.type === 'right'
+            && inputs.rightType === 'membership'
+            && inputs.membershipType === 'original';
+
+        if (isRedevOriginal && inputs.priorBuildingValue > 0) {
+            redevCalc = this.getRedevOriginalMemberCalc(inputs, acquisitionCost, necessaryExpenses, transferPrice);
+        }
+
+        let capitalGains;
+        if (redevCalc) {
+            capitalGains = redevCalc.totalCapitalGains;
+            acquisitionCalcDetail = `원조합원 분리 계산: 기존부동산부 ${this.formatCurrency(redevCalc.preApprovalGains)} + 권리부 ${this.formatCurrency(redevCalc.postApprovalGains)}`;
+        } else if (isRedevOriginal || (inputs.type === 'right' && inputs.rightType === 'membership')) {
+            // 납부 청산금을 취득원가 추가 공제로 처리
+            capitalGains = transferPrice - acquisitionCost - inputs.paidClearanceAmount - necessaryExpenses;
+            if (inputs.paidClearanceAmount > 0) {
+                acquisitionCalcDetail += ` (청산금 ${this.formatCurrency(inputs.paidClearanceAmount)} 추가 공제)`;
+            }
+        } else {
+            capitalGains = transferPrice - acquisitionCost - necessaryExpenses;
+        }
         capitalGains = Math.max(0, capitalGains);
 
         const nonTaxableInfo = this.checkNonTaxable(inputs);
@@ -186,8 +214,14 @@ class TaxCalculator {
         }
 
         const heavyTaxInfo = this.checkHeavyTax(inputs);
-        const deductionRate = heavyTaxInfo.isApplicable ? 0 : this.getLongTermDeductionRate(inputs, isNonTaxable);
-        const longTermDeduction = Math.floor(taxableGains * deductionRate);
+        let deductionRate = heavyTaxInfo.isApplicable ? 0 : this.getLongTermDeductionRate(inputs, isNonTaxable);
+        let longTermDeduction = Math.floor(taxableGains * deductionRate);
+
+        // 원조합원 분리 계산: 장특공제를 기존 부동산부 차익에만 적용
+        if (redevCalc && !heavyTaxInfo.isApplicable) {
+            deductionRate = redevCalc.deductionRate;
+            longTermDeduction = redevCalc.longTermDeduction;
+        }
 
         let incomeAmount = taxableGains - longTermDeduction;
         incomeAmount = Math.max(0, incomeAmount);
@@ -279,7 +313,8 @@ class TaxCalculator {
             taxableRatio,
             tempTwoHomeInfo: nonTaxableInfo.tempTwoHomeInfo || null,
             isMixedUse,
-            mixedUseApportionment
+            mixedUseApportionment,
+            redevCalc
         };
 
         result.nonTaxableChecklist = this.buildNonTaxableChecklist(inputs, result);
@@ -291,44 +326,85 @@ class TaxCalculator {
         return result;
     }
 
-    normalizeInputs(inputs) {
-        return {
-            ...inputs,
-            type: inputs.type || 'house',
-            assetCategory: inputs.assetCategory || 'house',
-            otherAssetCategory: inputs.otherAssetCategory || '',
-            houseTaxView: inputs.houseTaxView || '',
-            houseNonTaxableCategory: inputs.houseNonTaxableCategory || '',
-            houseCount: Number(inputs.houseCount || 1),
-            temp2House: inputs.temp2House || 'no',
-            specialCases: Array.isArray(inputs.specialCases) ? inputs.specialCases : [],
-            isJointOwnership: Boolean(inputs.isJointOwnership),
-            acquisitionMethod: inputs.acquisitionMethod || 'real',
-            transferPrice: Number(inputs.transferPrice || 0),
-            acquisitionPrice: Number(inputs.acquisitionPrice || 0),
-            necessaryExpenses: Number(inputs.necessaryExpenses || 0),
-            transferTaxBase: Number(inputs.transferTaxBase || 0),
-            acquisitionTaxBase: Number(inputs.acquisitionTaxBase || 0),
-            holdingPeriod: Number(inputs.holdingPeriod || 0),
-            residencyPeriod: Number(inputs.residencyPeriod || 0),
-            buyDate: inputs.buyDate || '',
-            contractDate: inputs.contractDate || '',
-            sellDate: inputs.sellDate || '',
-            newHomeContractDate: inputs.newHomeContractDate || '',
-            stockItemCount: Number(inputs.stockItemCount || 1),
-            stockRateCategory: inputs.stockRateCategory || 'general20',
-            isAdjustedAreaAtAcquisition: this.normalizeChoice(inputs.isAdjustedAreaAtAcquisition),
-            oldHomeAdjustedAtNewHomeContract: this.normalizeChoice(inputs.oldHomeAdjustedAtNewHomeContract),
-            newHomeAdjustedAtContract: this.normalizeChoice(inputs.newHomeAdjustedAtContract),
-            isAdjustedAreaAtTransfer: this.normalizeChoice(inputs.isAdjustedAreaAtTransfer),
+    normalizeInputs(rawInputs) {
+        const inputs = {
+            ...rawInputs,
+            type: rawInputs.type || 'house',
+            assetCategory: rawInputs.assetCategory || 'house',
+            otherAssetCategory: rawInputs.otherAssetCategory || '',
+            houseTaxView: rawInputs.houseTaxView || '',
+            houseNonTaxableCategory: rawInputs.houseNonTaxableCategory || '',
+            houseCount: Number(rawInputs.houseCount || 1),
+            effectiveHouseCount: rawInputs.effectiveHouseCount != null
+                ? Number(rawInputs.effectiveHouseCount)
+                : Number(rawInputs.houseCount || 1),
+            temp2House: rawInputs.temp2House || 'no',
+            specialCases: Array.isArray(rawInputs.specialCases) ? rawInputs.specialCases : [],
+            isJointOwnership: Boolean(rawInputs.isJointOwnership),
+            acquisitionMethod: rawInputs.acquisitionMethod || 'real',
+            transferPrice: Number(rawInputs.transferPrice || 0),
+            acquisitionPrice: Number(rawInputs.acquisitionPrice || 0),
+            necessaryExpenses: Number(rawInputs.necessaryExpenses || 0),
+            transferTaxBase: Number(rawInputs.transferTaxBase || 0),
+            acquisitionTaxBase: Number(rawInputs.acquisitionTaxBase || 0),
+            holdingPeriod: Number(rawInputs.holdingPeriod || 0),
+            residencyPeriod: Number(rawInputs.residencyPeriod || 0),
+            buyDate: rawInputs.buyDate || '',
+            contractDate: rawInputs.contractDate || '',
+            sellDate: rawInputs.sellDate || '',
+            newHomeContractDate: rawInputs.newHomeContractDate || '',
+            marriageDate: rawInputs.marriageDate || '',
+            inheritanceSaleType: rawInputs.inheritanceSaleType || '',
+            inheritanceShareType: rawInputs.inheritanceShareType || '',
+            inheritanceRuralHouseType: rawInputs.inheritanceRuralHouseType || '',
+            propertySpecialCases: Array.isArray(rawInputs.propertySpecialCases) ? rawInputs.propertySpecialCases : [],
+            stockItemCount: Number(rawInputs.stockItemCount || 1),
+            stockRateCategory: rawInputs.stockRateCategory || 'general20',
+            isAdjustedAreaAtAcquisition: this.normalizeChoice(rawInputs.isAdjustedAreaAtAcquisition),
+            oldHomeAdjustedAtNewHomeContract: this.normalizeChoice(rawInputs.oldHomeAdjustedAtNewHomeContract),
+            newHomeAdjustedAtContract: this.normalizeChoice(rawInputs.newHomeAdjustedAtContract),
+            isAdjustedAreaAtTransfer: this.normalizeChoice(rawInputs.isAdjustedAreaAtTransfer),
             // 겸용주택 관련
-            mixedUseHouseArea: Number(inputs.mixedUseHouseArea || 0),
-            mixedUseCommercialArea: Number(inputs.mixedUseCommercialArea || 0),
-            mixedUseHouseStdPrice: Number(inputs.mixedUseHouseStdPrice || 0),
-            mixedUseCommercialStdPrice: Number(inputs.mixedUseCommercialStdPrice || 0),
-            mixedUseHouseStdPriceAtAcq: Number(inputs.mixedUseHouseStdPriceAtAcq || 0),
-            mixedUseCommercialStdPriceAtAcq: Number(inputs.mixedUseCommercialStdPriceAtAcq || 0)
+            mixedUseHouseArea: Number(rawInputs.mixedUseHouseArea || 0),
+            mixedUseCommercialArea: Number(rawInputs.mixedUseCommercialArea || 0),
+            mixedUseHouseStdPrice: Number(rawInputs.mixedUseHouseStdPrice || 0),
+            mixedUseCommercialStdPrice: Number(rawInputs.mixedUseCommercialStdPrice || 0),
+            mixedUseHouseStdPriceAtAcq: Number(rawInputs.mixedUseHouseStdPriceAtAcq || 0),
+            mixedUseCommercialStdPriceAtAcq: Number(rawInputs.mixedUseCommercialStdPriceAtAcq || 0),
+            // 재개발·재건축 관련
+            redevSaleType: rawInputs.redevSaleType || '',
+            approvalDate: rawInputs.approvalDate || '',
+            completionDate: rawInputs.completionDate || '',
+            priorBuildingValue: Number(rawInputs.priorBuildingValue || 0),
+            paidClearanceAmount: Number(rawInputs.paidClearanceAmount || 0),
+            // 임대사업자 거주주택 특례 관련
+            rentalSaleType: rawInputs.rentalSaleType || '',
+            rentalIsRegistered: rawInputs.rentalIsRegistered || '',
+            rentalRegisteredBefore2020: rawInputs.rentalRegisteredBefore2020 || '',
+            rentalPeriodType: rawInputs.rentalPeriodType || '',
+            rentalPriceCapMet: rawInputs.rentalPriceCapMet || ''
         };
+
+        // 승계조합원 완공 후 양도 → 사실상 주택 양도로 취급, 보유기간 준공일부터 재산정
+        if (
+            inputs.type === 'right'
+            && inputs.rightType === 'membership'
+            && inputs.membershipType === 'succeeding'
+            && inputs.redevSaleType === 'after_completion'
+            && inputs.completionDate
+        ) {
+            inputs.type = 'house';
+            inputs.redevOriginalType = 'succeeding_after_completion';
+
+            const completionDate = this.toDate(inputs.completionDate);
+            const sellDate = this.toDate(inputs.sellDate);
+            if (completionDate && sellDate && sellDate > completionDate) {
+                const days = (sellDate - completionDate) / (1000 * 60 * 60 * 24);
+                inputs.holdingPeriod = Number((days / 365.25).toFixed(2));
+            }
+        }
+
+        return inputs;
     }
 
     normalizeChoice(value) {
@@ -354,7 +430,7 @@ class TaxCalculator {
             };
         }
 
-        if (inputs.houseCount === 1) {
+        if (inputs.effectiveHouseCount === 1) {
             if (inputs.holdingPeriod < 2) {
                 return {
                     isEligible: false,
@@ -364,11 +440,21 @@ class TaxCalculator {
             }
 
             if (inputs.isAdjustedAreaAtAcquisition === 'yes' && inputs.residencyPeriod < 2) {
-                return {
-                    isEligible: false,
-                    needsReview: false,
-                    message: '조정대상지역 취득 주택으로 보아 거주기간 2년 요건을 충족하지 못한 것으로 계산했습니다.'
-                };
+                if (inputs.winwinRentalApplied === 'yes') {
+                    // 상생임대 특례 적용: 거주 2년 요건 면제 (소득령 §155조의3)
+                } else if (inputs.winwinRentalApplied === 'unknown') {
+                    return {
+                        isEligible: false,
+                        needsReview: true,
+                        message: '상생임대 특례 요건 충족 여부가 불확실합니다. 요건을 갖추면 거주기간 2년 없이도 비과세 가능합니다.'
+                    };
+                } else {
+                    return {
+                        isEligible: false,
+                        needsReview: false,
+                        message: '조정대상지역 취득 주택으로 보아 거주기간 2년 요건을 충족하지 못한 것으로 계산했습니다.'
+                    };
+                }
             }
 
             if (inputs.isAdjustedAreaAtAcquisition === 'unknown' && inputs.residencyPeriod < 2) {
@@ -386,7 +472,7 @@ class TaxCalculator {
             };
         }
 
-        if (inputs.houseCount === 2 && inputs.temp2House === 'yes') {
+        if (inputs.effectiveHouseCount === 2 && inputs.temp2House === 'yes') {
             const tempTwoHomeInfo = this.checkTemporaryTwoHome(inputs);
             return {
                 isEligible: tempTwoHomeInfo.isEligible,
@@ -396,10 +482,204 @@ class TaxCalculator {
             };
         }
 
+        if (inputs.houseNonTaxableCategory === 'specialNonTaxable') {
+            return this.checkSpecialNonTaxable(inputs);
+        }
+
+        // specialNonTaxable 경로가 아니어도 특례 케이스를 선택했으면 검토
+        const specialCasesForCheck = inputs.specialCases || [];
+        const SPECIAL_CASE_KEYS = ['rental', 'marriage', 'inherited', 'winwin'];
+        if (SPECIAL_CASE_KEYS.some(k => specialCasesForCheck.includes(k))) {
+            return this.checkSpecialNonTaxable(inputs);
+        }
+
         return {
             isEligible: false,
             needsReview: false,
             message: '다주택 또는 일반 과세 흐름으로 계산했습니다.'
+        };
+    }
+
+    checkSpecialNonTaxable(inputs) {
+        const specialCases = inputs.specialCases || [];
+
+        // ── 혼인 특례 ──
+        if (specialCases.includes('marriage')) {
+            if (!inputs.marriageDate || !inputs.sellDate) {
+                return {
+                    isEligible: false,
+                    needsReview: true,
+                    message: '혼인합가일 또는 양도일 정보가 부족하여 10년 특례 여부를 판정할 수 없습니다. 혼인관계증명서와 매매계약서를 확인하세요.'
+                };
+            }
+            const marriageDate = this.toDate(inputs.marriageDate);
+            const sellDate = this.toDate(inputs.sellDate);
+            const deadline = new Date(marriageDate);
+            deadline.setFullYear(deadline.getFullYear() + 10);
+
+            if (sellDate <= deadline) {
+                return {
+                    isEligible: true,
+                    needsReview: true,
+                    message: `혼인합가일(${this.formatDate(marriageDate)})로부터 10년 이내 양도에 해당합니다. 혼인 전 각자 1주택을 보유했고 보유·거주 요건을 충족하면 비과세가 적용됩니다. 전문가 확인을 권장합니다.`
+                };
+            } else {
+                return {
+                    isEligible: false,
+                    needsReview: false,
+                    message: `혼인합가일(${this.formatDate(marriageDate)})로부터 10년이 경과하여(기한: ${this.formatDate(deadline)}) 혼인 특례 비과세 요건을 충족하지 못했습니다.`
+                };
+            }
+        }
+
+        // ── 상속 특례 ──
+        if (specialCases.includes('inherited')) {
+            if (inputs.inheritanceSaleType === 'general') {
+                const isRural = inputs.inheritanceRuralHouseType === 'rural_5yr';
+                if (inputs.holdingPeriod >= 2) {
+                    if (isRural) {
+                        return {
+                            isEligible: true,
+                            needsReview: true,
+                            message: '피상속인이 5년 이상 거주한 농어촌주택을 상속받은 경우(소득세법 시행령 §155⑦①), 상속개시일 이후 새로 취득한 일반주택을 양도할 때도 1주택으로 보아 비과세가 가능합니다. 수도권 밖 읍·면 소재 여부, 피상속인 거주 기간(5년 이상) 등 요건을 전문가와 확인하세요.'
+                        };
+                    }
+                    return {
+                        isEligible: true,
+                        needsReview: true,
+                        message: '상속주택을 보유하고 상속개시 당시 보유하던 일반주택을 양도하는 경우, 상속 당시 1주택자였다면 1세대 1주택 비과세 특례(§155②)가 적용될 수 있습니다. 상속개시 당시 주택 수 및 요건을 전문가와 확인하세요.'
+                    };
+                } else {
+                    return {
+                        isEligible: false,
+                        needsReview: true,
+                        message: `상속 ${isRural ? '농어촌주택(§155⑦①)' : '특례(§155②)'} 비과세가 가능하나 보유기간 2년 요건을 충족하지 못했습니다. 보유기간 요건과 상속개시 당시 주택 수를 전문가와 확인하세요.`
+                    };
+                }
+            } else if (inputs.inheritanceSaleType === 'inherited') {
+                if (inputs.inheritanceShareType === 'minority') {
+                    return {
+                        isEligible: false,
+                        needsReview: true,
+                        message: '공동상속주택 소수지분자는 해당 주택이 주택 수에서 제외되어 주택 수 산정에는 유리합니다. 다만 소수지분을 양도할 때는 비과세가 아닌 일반 양도로 취급되며, 취득가액·장기보유특별공제 계산이 복잡하므로 전문가 확인이 필요합니다.'
+                    };
+                }
+                // 단독 상속 또는 최대지분자
+                return {
+                    isEligible: false,
+                    needsReview: true,
+                    message: '상속받은 주택 자체를 양도하는 경우, 상속 당시 무주택자였고 보유·거주 요건을 충족하면 1세대 1주택 비과세가 가능합니다. 상속개시 당시 주택 보유 여부, 보유·거주 기간 요건을 전문가와 확인하세요.'
+                };
+            }
+            return {
+                isEligible: false,
+                needsReview: true,
+                message: '상속 특례 비과세 여부는 양도하는 주택의 유형, 상속 당시 주택 수 등에 따라 달라집니다. 전문가 확인이 필요합니다.'
+            };
+        }
+
+        // ── 임대사업자 거주주택 특례 (소득세법 시행령 §155⑳) ──
+        if (specialCases.includes('rental')) {
+            const { rentalSaleType, rentalIsRegistered, rentalRegisteredBefore2020, rentalPeriodType, rentalPriceCapMet } = inputs;
+            const residencyPeriod = inputs.residencyPeriod || 0;
+
+            // 정보 미입력
+            if (!rentalSaleType) {
+                return {
+                    isEligible: false,
+                    needsReview: true,
+                    message: '임대사업자 특례 판정을 위해 양도 집 종류와 등록 정보를 입력해주세요.'
+                };
+            }
+
+            // 임대주택 자체 양도: 비과세 불가, 중과세 배제 가능
+            if (rentalSaleType === 'rental_property') {
+                return {
+                    isEligible: false,
+                    needsReview: rentalIsRegistered === 'yes',
+                    message: rentalIsRegistered === 'yes'
+                        ? '등록 임대주택을 양도하는 경우 비과세는 적용되지 않습니다. 단, 장기임대주택 등록 요건(소득세법 시행령 §167의3①②)을 갖추었다면 다주택 중과세가 배제될 수 있습니다. 전문가 확인을 권장합니다.'
+                        : '임대주택을 양도하는 경우 비과세는 적용되지 않습니다.'
+                };
+            }
+
+            // 거주주택 양도: 비과세 특례 요건 검토
+            if (rentalIsRegistered === 'no') {
+                return {
+                    isEligible: false,
+                    needsReview: false,
+                    message: '세무서(사업자등록)와 지자체(민간임대주택법 §5 임대사업자등록) 모두 등록하지 않은 경우 거주주택 비과세 특례(§155⑳)를 적용받을 수 없습니다.'
+                };
+            }
+            if (rentalIsRegistered === 'unknown') {
+                return {
+                    isEligible: false,
+                    needsReview: true,
+                    message: '임대주택의 등록 여부를 확인하세요. 세무서 사업자등록과 지자체 임대사업자등록이 모두 완료되어 있어야 거주주택 비과세 특례(§155⑳)가 가능합니다.'
+                };
+            }
+
+            // 거주기간 2년 이상 (§155⑳①)
+            if (residencyPeriod < 2) {
+                return {
+                    isEligible: false,
+                    needsReview: false,
+                    message: `거주주택 비과세 특례(§155⑳)는 보유기간 중 거주기간이 2년 이상이어야 합니다. 현재 입력 기준 거주기간은 ${Math.floor(residencyPeriod)}년입니다.`
+                };
+            }
+
+            // 2020년 7월 10일 이전 등록 여부 (§155⑳ 가목·다목~마목 적용 요건)
+            if (rentalRegisteredBefore2020 === 'no') {
+                return {
+                    isEligible: false,
+                    needsReview: true,
+                    message: '2020년 7월 11일 이후에 등록한 임대주택은 §155⑳의 장기임대주택 요건을 원칙적으로 충족하지 못합니다(아파트 장기임대 매입 신규등록 불가). 단, 민간건설임대(바목) 등 일부 예외가 있을 수 있으므로 전문가 확인이 필요합니다.'
+                };
+            }
+
+            // 임대료 5% 상한 미준수
+            if (rentalPriceCapMet === 'no') {
+                return {
+                    isEligible: false,
+                    needsReview: false,
+                    message: '임대료(보증금 포함)를 직전 계약 대비 5% 초과 인상한 경우 거주주택 비과세 특례(§155⑳②) 요건을 충족하지 못합니다.'
+                };
+            }
+
+            const needsReview = rentalRegisteredBefore2020 === 'unknown' || rentalPriceCapMet === 'unknown' || !rentalPeriodType;
+
+            // 의무임대기간 미충족: §155㉑에 따라 선적용 가능하나 사후 미충족 시 추납
+            if (rentalPeriodType === 'under5') {
+                return {
+                    isEligible: true,
+                    needsReview: true,
+                    message: '의무임대기간을 아직 채우지 않았더라도 거주주택 비과세 특례(§155⑳, ㉑)를 먼저 적용받을 수 있습니다. 다만, 이후 의무임대기간을 충족하지 못하면 소급하여 세액을 추납(사유발생월 말일로부터 2개월 이내)해야 합니다. 반드시 전문가와 확인하세요.'
+                };
+            }
+
+            return {
+                isEligible: true,
+                needsReview,
+                message: needsReview
+                    ? '입력 정보 기준으로 거주주택 비과세 특례(소득세법 시행령 §155⑳) 요건을 충족할 가능성이 있습니다. 등록 요건, 임대기간, 임대료 증액 제한 등을 전문가와 최종 확인하세요.'
+                    : '거주주택 비과세 특례(소득세법 시행령 §155⑳) 요건을 충족한 것으로 계산했습니다. 임대사업자 등록 유지 및 의무임대기간 준수 여부를 양도 전 최종 확인하세요.'
+            };
+        }
+
+        // ── 상생임대 특례 ──
+        if (specialCases.includes('winwin')) {
+            return {
+                isEligible: false,
+                needsReview: true,
+                message: '상생임대 특례는 직전 계약 대비 임대료 5% 이하 인상, 2026년 12월 31일까지 계약 체결 요건을 충족하면 거주기간 요건 없이 비과세가 가능합니다. 직전·신규 임대차계약서로 요건을 확인하세요.'
+            };
+        }
+
+        // 기타 특례 (오피스텔, 농어촌주택 등)
+        return {
+            isEligible: false,
+            needsReview: true,
+            message: '선택하신 특례는 요건이 복잡하여 전문가 확인이 필요합니다. 결과 화면의 주의사항을 참고하세요.'
         };
     }
 
@@ -474,15 +754,23 @@ class TaxCalculator {
     }
 
     checkHeavyTax(inputs) {
-        if (inputs.type !== 'house' || inputs.houseCount < 2) {
+        const effectiveCount = inputs.effectiveHouseCount ?? inputs.houseCount;
+        if (inputs.type !== 'house' || effectiveCount < 2) {
             return { isApplicable: false, addRate: 0 };
+        }
+
+        // 등록 임대주택 양도: 중과세 배제 (소득세법 시행령 §167의3①②)
+        if ((inputs.specialCases || []).includes('rental') &&
+            inputs.rentalSaleType === 'rental_property' &&
+            inputs.rentalIsRegistered === 'yes') {
+            return { isApplicable: false, addRate: 0, rentalExemptionApplied: true };
         }
 
         if (inputs.isAdjustedAreaAtTransfer !== 'yes') {
             return { isApplicable: false, addRate: 0 };
         }
 
-        const hypotheticalAddRate = inputs.houseCount === 2 ? 0.20 : 0.30;
+        const hypotheticalAddRate = effectiveCount === 2 ? 0.20 : 0.30;
 
         const sellDate = this.toDate(inputs.sellDate);
         const heavyTaxStartDate = this.toDate('2026-05-10');
@@ -504,7 +792,46 @@ class TaxCalculator {
 
         return {
             isApplicable: true,
-            addRate: inputs.houseCount === 2 ? 0.20 : 0.30
+            addRate: effectiveCount === 2 ? 0.20 : 0.30
+        };
+    }
+
+    getRedevOriginalMemberCalc(inputs, acquisitionCost, necessaryExpenses, transferPrice) {
+        const approvalDate = this.toDate(inputs.approvalDate);
+        const buyDate = this.toDate(inputs.buyDate);
+
+        let preApprovalHoldingYears = inputs.holdingPeriod;
+        if (approvalDate && buyDate && approvalDate > buyDate) {
+            const days = (approvalDate - buyDate) / (1000 * 60 * 60 * 24);
+            preApprovalHoldingYears = Math.max(0, days / 365.25);
+        }
+
+        const priorBuildingValue = inputs.priorBuildingValue;
+        const paidClearanceAmount = inputs.paidClearanceAmount || 0;
+
+        // 기존 부동산부 차익 (인가 전): 관리처분 평가액 - 취득가액(취득세 등 포함)
+        const preApprovalGains = Math.max(0, priorBuildingValue - acquisitionCost);
+
+        // 권리부 차익 (인가 후): 양도가액 - (관리처분 평가액 + 납부청산금) - 양도 필요경비
+        const postApprovalGains = Math.max(0, transferPrice - priorBuildingValue - paidClearanceAmount - necessaryExpenses);
+
+        const totalCapitalGains = preApprovalGains + postApprovalGains;
+
+        // 장특공제: 기존 부동산부 차익에만, 인가 전 보유기간 기준 (일반 연 2%, 최대 30%)
+        const preApprovalYears = Math.floor(preApprovalHoldingYears);
+        const deductionRate = preApprovalYears >= 3
+            ? Number(Math.min(preApprovalYears * this.data.LONG_TERM_GENERAL.RATE_PER_YEAR, this.data.LONG_TERM_GENERAL.MAX_RATE).toFixed(2))
+            : 0;
+        const longTermDeduction = Math.floor(preApprovalGains * deductionRate);
+
+        return {
+            preApprovalGains,
+            postApprovalGains,
+            totalCapitalGains,
+            preApprovalHoldingYears,
+            deductionRate,
+            longTermDeduction,
+            paidClearanceAmount
         };
     }
 
@@ -512,7 +839,10 @@ class TaxCalculator {
         if (inputs.type === 'stock') return 0;
         if (inputs.type === 'right') {
             if (inputs.rightType === 'ticket') return 0; // 분양권은 장특공제 불가
-            if (inputs.rightType === 'membership' && inputs.membershipType === 'succeeding') return 0; // 승계조합원은 장특공제 불가
+            // 승계조합원: 입주권 상태 양도는 장특공제 불가 (완공 후는 이미 type='house'로 변환됨)
+            if (inputs.rightType === 'membership' && inputs.membershipType === 'succeeding') return 0;
+            // 원조합원: redevCalc에서 별도 계산하므로 여기서는 0 반환 (calculate()에서 override)
+            if (inputs.rightType === 'membership' && inputs.membershipType === 'original') return 0;
         }
 
         const years = Math.floor(inputs.holdingPeriod);
@@ -638,9 +968,9 @@ class TaxCalculator {
             } else {
                 statusLabel = '일반과세';
                 headline = '중과세는 적용되지 않았습니다.';
-                subheadline = inputs.houseCount >= 2
+                subheadline = inputs.effectiveHouseCount >= 2
                     ? '현재 입력 기준으로 다주택 중과 요건에는 해당하지 않아 기본세율 흐름으로 계산했습니다.'
-                    : '1주택 과세 흐름으로 계산했습니다.';
+                    : '실질 1주택 흐름으로 계산했습니다.';
             }
         } else if (inputs.type === 'stock' && !reviewRequired) {
             tone = 'taxable';
@@ -749,9 +1079,9 @@ class TaxCalculator {
                 path.push('현재 입력값 기준으로 다주택 중과 요건에 해당해 중과세율을 반영했습니다.');
             } else {
                 path.push(
-                    inputs.houseCount >= 2
+                    inputs.effectiveHouseCount >= 2
                         ? '현재 입력값 기준으로 다주택 중과 요건에는 해당하지 않아 기본세율 흐름으로 계산했습니다.'
-                        : '현재 입력값 기준으로 1주택 일반과세 흐름으로 계산했습니다.'
+                        : '실질 1주택 일반과세 흐름으로 계산했습니다.'
                 );
             }
         }
@@ -780,7 +1110,7 @@ class TaxCalculator {
 
         if (
             inputs.type === 'house' &&
-            inputs.houseCount === 1 &&
+            inputs.effectiveHouseCount === 1 &&
             inputs.isAdjustedAreaAtAcquisition === 'unknown' &&
             inputs.residencyPeriod < 2
         ) {
@@ -789,7 +1119,7 @@ class TaxCalculator {
 
         if (
             inputs.type === 'house' &&
-            inputs.houseCount >= 2 &&
+            inputs.effectiveHouseCount >= 2 &&
             inputs.isAdjustedAreaAtTransfer === 'unknown' &&
             this.toDate(inputs.sellDate) >= this.toDate('2026-05-10')
         ) {
@@ -825,7 +1155,17 @@ class TaxCalculator {
         });
 
         if (inputs.type === 'right' && inputs.rightType === 'membership' && inputs.membershipType === 'original') {
-            cautions.push('원조합원의 조합원입주권 양도차익은 관리처분계획 인가일 전후를 나누어 복잡하게 계산해야 하며, 장기보유특별공제는 인가일 이전까지만 적용됩니다. 본 계산기는 입력된 전체 기간을 바탕으로 한 단순 추정치이므로 반드시 세무 전문가의 상담을 받으시기 바랍니다.');
+            if (inputs.priorBuildingValue > 0 && inputs.approvalDate) {
+                cautions.push('원조합원 분리 계산이 적용되었습니다. 관리처분계획 평가액(권리가액)과 인가일은 조합에서 발급하는 서류로 반드시 확인하고, 실제 신고 전에는 세무 전문가와 검토하시기 바랍니다.');
+            } else {
+                cautions.push('원조합원 조합원입주권 계산을 위해 관리처분계획 인가일과 기존건물 평가액(권리가액)을 입력하면 인가 전·후 차익을 분리하여 장기보유특별공제를 정확히 계산할 수 있습니다. 현재는 단순 추정치입니다.');
+            }
+        }
+        if (inputs.redevOriginalType === 'succeeding_after_completion') {
+            cautions.push('승계조합원 완공 후 양도는 준공일부터 보유기간이 새로 시작됩니다. 1세대 1주택 비과세를 받으려면 준공일 이후 2년 이상 보유(조정지역 취득 시 거주도 2년) 요건을 충족해야 합니다.');
+        }
+        if ((inputs.specialCases || []).includes('cash_settlement')) {
+            cautions.push('현금청산 양도일은 대금청산일(현금청산금 수령일)을 기준으로 합니다. 사용승인일, 이주일 등과 혼동하지 않도록 주의하세요.');
         }
 
         if (inputs.isJointOwnership) {
@@ -870,6 +1210,23 @@ class TaxCalculator {
             documents.add('신규주택 계약서 또는 취득일 증빙');
         }
 
+        // 재개발·재건축 서류
+        if (inputs.rightType === 'membership' || inputs.redevOriginalType) {
+            documents.add('조합원 분양계약서 또는 입주권 관련 서류');
+            documents.add('관리처분계획인가서 (인가일 확인)');
+            if (inputs.membershipType === 'original') {
+                documents.add('기존건물 권리가액(평가액) 산정자료');
+                documents.add('납부 청산금 영수증 또는 청산금 납부확인서');
+            }
+            if (inputs.membershipType === 'succeeding') {
+                documents.add('입주권 매수 계약서');
+                documents.add('납부 청산금 영수증 (해당 시)');
+            }
+            if (inputs.redevSaleType === 'after_completion' || inputs.redevOriginalType === 'succeeding_after_completion') {
+                documents.add('준공검사 합격 확인서 또는 사용승인서');
+            }
+        }
+
         inputs.specialCases.forEach((key) => {
             const specialCase = this.data.SPECIAL_CASES[key];
             if (specialCase) {
@@ -888,9 +1245,10 @@ class TaxCalculator {
         const residencyYears = Math.floor(inputs.residencyPeriod);
 
         // 1세대 1주택 여부
-        if (inputs.houseCount === 1) {
-            checks.push({ pass: true, label: '1세대 1주택', detail: '양도일 현재 한 채만 보유' });
-        } else if (inputs.houseCount === 2 && inputs.temp2House === 'yes') {
+        if (inputs.effectiveHouseCount === 1) {
+            const tag = inputs.houseCount > 1 ? `(원래 ${inputs.houseCount}주택 → 주택수 제외 적용)` : '';
+            checks.push({ pass: true, label: '1세대 1주택', detail: `양도일 현재 실질 한 채 ${tag}`.trim() });
+        } else if (inputs.effectiveHouseCount === 2 && inputs.temp2House === 'yes') {
             checks.push({
                 pass: result.tempTwoHomeInfo?.isEligible || false,
                 label: '일시적 2주택 특례',
@@ -898,8 +1256,69 @@ class TaxCalculator {
                     ? `신규주택 계약일 기준 ${result.tempTwoHomeInfo?.allowedYears || 3}년 이내 양도`
                     : `허용기간 초과 (기한: ${result.tempTwoHomeInfo?.deadlineLabel || '확인 필요'})`
             });
+        } else if (inputs.houseNonTaxableCategory === 'specialNonTaxable') {
+            const specialCases = inputs.specialCases || [];
+            if (specialCases.includes('inherited')) {
+                if (inputs.inheritanceSaleType === 'general') {
+                    if (inputs.inheritanceRuralHouseType === 'rural_5yr') {
+                        checks.push({
+                            pass: null,
+                            label: '농어촌 상속주택 특례 — 비과세 검토 (§155⑦①)',
+                            detail: '피상속인 5년 거주 농어촌주택 상속 → 상속 후 취득 일반주택 양도 시도 1주택으로 간주 (전문가 확인 필요)'
+                        });
+                    } else {
+                        checks.push({
+                            pass: null,
+                            label: '상속주택 보유로 인한 2주택 — 특례 비과세 검토 (§155②)',
+                            detail: '상속 당시 1주택자였고 상속개시 당시 보유하던 일반주택 양도 시 1세대 1주택 특례 비과세 가능 (전문가 확인 필요)'
+                        });
+                    }
+                } else if (inputs.inheritanceSaleType === 'inherited') {
+                    checks.push({
+                        pass: null,
+                        label: '상속받은 주택 양도 — 특례 비과세 검토',
+                        detail: '상속 당시 무주택자이고 보유·거주 요건을 충족하는 경우 비과세 가능 (전문가 확인 필요)'
+                    });
+                } else {
+                    checks.push({ pass: null, label: '상속 특례 비과세 검토', detail: '양도하는 주택 유형을 확인하세요.' });
+                }
+            } else if (specialCases.includes('marriage')) {
+                checks.push({
+                    pass: null,
+                    label: '혼인 특례 — 2주택 특례 비과세 검토',
+                    detail: '혼인으로 인한 2주택, 혼인신고일 10년 이내 양도 시 특례 비과세 가능'
+                });
+            } else if (specialCases.includes('rental')) {
+                const isSaleOfRental = inputs.rentalSaleType === 'rental_property';
+                checks.push({
+                    pass: isSaleOfRental ? false : (result.isNonTaxable ? true : (result.nonTaxableInfo.needsReview ? null : false)),
+                    label: '임대사업자 거주주택 비과세 특례 검토 (§155⑳)',
+                    detail: isSaleOfRental
+                        ? '임대주택 양도 — 비과세 불가, 중과세 배제 검토 필요'
+                        : (result.isNonTaxable
+                            ? '거주주택 양도 — 비과세 요건 충족'
+                            : '거주주택 양도 — 등록·거주기간·임대료 증액 등 요건 확인 필요')
+                });
+            } else {
+                checks.push({
+                    pass: null,
+                    label: '특례 비과세 검토 대상',
+                    detail: '해당 특례 요건 충족 여부는 전문가 확인이 필요합니다.'
+                });
+            }
+        } else if ((inputs.specialCases || []).includes('rental')) {
+            const isSaleOfRental = inputs.rentalSaleType === 'rental_property';
+            checks.push({
+                pass: isSaleOfRental ? false : (result.isNonTaxable ? true : (result.nonTaxableInfo?.needsReview ? null : false)),
+                label: '임대사업자 거주주택 비과세 특례 검토 (§155⑳)',
+                detail: isSaleOfRental
+                    ? '임대주택 양도 — 비과세 불가, 중과세 배제 검토 필요'
+                    : (result.isNonTaxable
+                        ? '거주주택 양도 — 비과세 요건 충족'
+                        : '거주주택 양도 — 등록·거주기간·임대료 증액 등 요건 확인 필요')
+            });
         } else {
-            checks.push({ pass: false, label: '1세대 1주택', detail: `현재 ${inputs.houseCount}주택으로 비과세 불가` });
+            checks.push({ pass: false, label: '1세대 1주택', detail: `실질 ${inputs.effectiveHouseCount}주택으로 비과세 불가` });
         }
 
         // 보유기간 2년 이상
@@ -967,6 +1386,70 @@ class TaxCalculator {
     buildCalculationSteps(inputs, result) {
         const steps = [];
         const fmt = (v) => this.formatCurrency(v);
+
+        // 원조합원 분리 계산 스텝
+        if (result.redevCalc) {
+            const rc = result.redevCalc;
+            const preYears = Math.floor(rc.preApprovalHoldingYears);
+            steps.push({
+                step: 1,
+                label: '① 기존 부동산부 차익 (인가 전)',
+                formula: `관리처분 평가액 ${fmt(inputs.priorBuildingValue)} - 취득가액 ${fmt(result.acquisitionCost)}`,
+                result: fmt(rc.preApprovalGains),
+                note: `보유기간: 취득일 ~ 관리처분계획 인가일 (약 ${this.formatYears(rc.preApprovalHoldingYears)})`
+            });
+            steps.push({
+                step: 2,
+                label: '② 권리부 차익 (인가 후)',
+                formula: `양도가액 ${fmt(result.transferPrice)} - (평가액 ${fmt(inputs.priorBuildingValue)} + 청산금 ${fmt(rc.paidClearanceAmount)}) - 필요경비 ${fmt(result.necessaryExpenses)}`,
+                result: fmt(rc.postApprovalGains),
+                note: '관리처분계획 인가일 이후 ~ 양도일까지 발생한 차익 (장기보유특별공제 미적용)'
+            });
+            steps.push({
+                step: 3,
+                label: '총 양도차익 (① + ②)',
+                formula: `${fmt(rc.preApprovalGains)} + ${fmt(rc.postApprovalGains)}`,
+                result: fmt(result.capitalGains),
+                note: ''
+            });
+            steps.push({
+                step: 4,
+                label: '장기보유특별공제 (① 기존 부동산부에만 적용)',
+                formula: `${fmt(rc.preApprovalGains)} × ${Math.round(rc.deductionRate * 100)}%`,
+                result: `-${fmt(result.longTermDeduction)}`,
+                note: `인가 전 보유기간 ${preYears}년 기준 (연 2%, 최대 30%)`
+            });
+            const incomeStep = 5;
+            steps.push({
+                step: incomeStep,
+                label: '양도소득금액',
+                formula: `${fmt(result.capitalGains)} - ${fmt(result.longTermDeduction)}`,
+                result: fmt(result.incomeAmount),
+                note: ''
+            });
+            steps.push({
+                step: incomeStep + 1,
+                label: '과세표준',
+                formula: `${fmt(result.incomeAmount)} - 기본공제 ${fmt(result.basicDeductionTotal)}`,
+                result: fmt(result.taxBaseTotal),
+                note: inputs.isJointOwnership ? '공동명의 50:50으로 인별 공제 적용' : '연 250만원 기본공제'
+            });
+            steps.push({
+                step: incomeStep + 2,
+                label: '산출세액',
+                formula: `과세표준 × ${Math.round(result.taxRate * 100)}%`,
+                result: fmt(result.calculatedTax),
+                note: ''
+            });
+            steps.push({
+                step: incomeStep + 3,
+                label: '총 납부세액 (지방소득세 10% 포함)',
+                formula: `${fmt(result.calculatedTax)} + ${fmt(result.localTax)}`,
+                result: fmt(result.totalTax),
+                note: '양도일이 속하는 달의 말일부터 2개월 이내 예정신고'
+            });
+            return steps;
+        }
 
         // Step 1: 양도차익
         steps.push({
@@ -1111,7 +1594,7 @@ class TaxCalculator {
             });
         } else if (
             inputs.type === 'house' &&
-            inputs.houseCount >= 2 &&
+            inputs.effectiveHouseCount >= 2 &&
             inputs.isAdjustedAreaAtTransfer === 'yes'
         ) {
             if (this.toDate(inputs.sellDate) < this.toDate('2026-05-10')) {
@@ -1137,7 +1620,7 @@ class TaxCalculator {
             });
         }
 
-        if (!result.isNonTaxable && inputs.type === 'house' && inputs.houseCount === 1) {
+        if (!result.isNonTaxable && inputs.type === 'house' && inputs.effectiveHouseCount === 1) {
             if (inputs.residencyPeriod < 2) {
                 scenarios.push({
                     tone: 'info',
@@ -1174,7 +1657,17 @@ class TaxCalculator {
 
     getCaseLabel(inputs, result = null) {
         if (inputs.type === 'stock') return '주식등';
-        if (inputs.type === 'right') return '분양권·입주권';
+        if (inputs.type === 'right') {
+            if (inputs.rightType === 'membership') {
+                const base = inputs.membershipType === 'original' ? '원조합원 입주권' : '승계조합원 입주권';
+                if (inputs.redevSaleType === 'after_completion') return `${base} (완공 후 양도)`;
+                return `${base} (입주권 상태 양도)`;
+            }
+            return '분양권·입주권';
+        }
+        // 승계조합원 완공 후 → type이 'house'로 변환된 케이스
+        if (inputs.redevOriginalType === 'succeeding_after_completion') return '승계조합원 (완공 후 새 아파트 양도)';
+        if ((inputs.specialCases || []).includes('cash_settlement')) return '재개발 현금청산';
         if (inputs.type === 'general') {
             if (inputs.otherAssetCategory === 'land') return '토지';
             if (inputs.otherAssetCategory === 'commercial') return '상가·일반 부동산';
@@ -1194,15 +1687,15 @@ class TaxCalculator {
                 return '주택 과세 · 중과세 적용';
             }
 
-            if (inputs.houseCount === 1) return '주택 과세 · 1주택 일반과세';
-            if (inputs.houseCount >= 2) return '주택 과세 · 일반과세';
+            if (inputs.effectiveHouseCount === 1) return '주택 과세 · 1주택 일반과세';
+            if (inputs.effectiveHouseCount >= 2) return '주택 과세 · 일반과세';
             return '주택 과세 검토';
         }
 
-        if (inputs.houseCount === 1) return '1세대 1주택';
-        if (inputs.houseCount === 2 && inputs.temp2House === 'yes') return '일시적 2주택 추정';
-        if (inputs.houseCount === 2) return '2주택';
-        return '3주택 이상';
+        if (inputs.effectiveHouseCount === 1) return inputs.houseCount > 1 ? `실질 1주택 (원래 ${inputs.houseCount}주택)` : '1세대 1주택';
+        if (inputs.effectiveHouseCount === 2 && inputs.temp2House === 'yes') return '일시적 2주택 추정';
+        if (inputs.effectiveHouseCount === 2) return '2주택';
+        return `${inputs.effectiveHouseCount}주택 이상`;
     }
 
     buildFilingGuide(inputs, result) {

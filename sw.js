@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tax-calculator-v1';
+const CACHE_NAME = 'tax-calculator-v8';
 const ASSETS = [
     './',
     './index.html',
@@ -18,10 +18,10 @@ self.addEventListener('install', (event) => {
     event.waitUntil(
         caches.open(CACHE_NAME)
             .then((cache) => {
-                // cache.addAll(ASSETS); 에러가 나더라도 설치되도록 처리
                 return cache.addAll(ASSETS).catch(err => console.log('Cache addAll failed', err));
             })
     );
+    self.skipWaiting();
 });
 
 // Activate Event: 이전 캐시 삭제
@@ -35,7 +35,7 @@ self.addEventListener('activate', (event) => {
                     }
                 })
             );
-        })
+        }).then(() => self.clients.claim())
     );
 });
 

@@ -242,12 +242,22 @@ class HWPXFormFiller {
             filename += '_자동채움';
         } else if (guide.formCode === '84의5') {
             updatedSectionXml = this.fillSimpleStockSection(sectionXml, { inputs, result, calculator });
-            filename += '_원본';
-            alert('별지84의5 주식등 양도소득세 간편신고서는 현재 빈 원본 양식만 다운로드됩니다. (자동채움 기능 준비 중)');
+            filename += '_자동채움';
         } else if (guide.formCode === '84') {
             updatedSectionXml = this.fillStandardSection(sectionXml, { inputs, result, calculator });
-            filename += '_원본';
-            alert('별지84 양도소득과세표준신고서는 현재 빈 원본 양식만 다운로드됩니다. (자동채움 기능 준비 중)');
+            filename += '_자동채움';
+            // 부표1(section2) 도 채움
+            const section2Entry = archive.getEntry('Contents/section2.xml');
+            if (section2Entry) {
+                const section2Xml = await this.readZipEntryText(section2Entry);
+                const updatedSection2Xml = this.fillStandardAppendixSection(section2Xml, { inputs, result, calculator });
+                const updated2Bytes = this.textEncoder.encode(updatedSection2Xml);
+                section2Entry.data = updated2Bytes;
+                section2Entry.compressionMethod = 0;
+                section2Entry.compressedSize = updated2Bytes.length;
+                section2Entry.uncompressedSize = updated2Bytes.length;
+                section2Entry.crc32 = this.calculateCrc32(updated2Bytes);
+            }
         }
 
         const updatedBytes = this.textEncoder.encode(updatedSectionXml);
@@ -261,13 +271,157 @@ class HWPXFormFiller {
     }
 
     fillSimpleStockSection(sectionXml, context) {
-        // 우선 원본 그대로 반환 (추후 HWPX 내부 표 위치 파악 후 채움 로직 작성)
-        return sectionXml;
+        const xmlDeclarationMatch = sectionXml.match(/^<\?xml[^>]+\?>\s*/);
+        const xmlDeclaration = xmlDeclarationMatch?.[0] || '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>';
+        const parser = new DOMParser();
+        const documentNode = parser.parseFromString(sectionXml, 'application/xml');
+
+        if (documentNode.getElementsByTagName('parsererror').length > 0) {
+            throw new Error('서식 XML을 해석하지 못했습니다.');
+        }
+
+        const mainTable = this.findTableByTexts(documentNode, ['양도인', '양도가액', '필요경비']);
+
+        if (!mainTable) {
+            throw new Error('자동채움 대상 서식 위치를 찾지 못했습니다.');
+        }
+
+        const { inputs, result, calculator } = context;
+        const totalNecessaryExpenses = Math.floor((result.acquisitionCost || 0) + (result.necessaryExpenses || 0));
+
+        // Section 1: 양도인 정보
+        this.setCellText(mainTable, 4, 11, inputs.sellerName || '');
+
+        // Section 3: 주식 상세내역 (주식1 = row 14)
+        this.setCellText(mainTable, 14, 32, this.formatDate(inputs.sellDate, calculator));
+        this.setCellText(mainTable, 14, 44, this.formatDate(inputs.buyDate, calculator));
+
+        // Section 4: 양도소득금액 계산 (합계=row20, 주식1=row21)
+        for (const row of [20, 21]) {
+            this.setCellText(mainTable, row, 2, this.formatAmount(result.transferPrice));
+            this.setCellText(mainTable, row, 14, this.formatAmount(result.acquisitionCost));
+            this.setCellText(mainTable, row, 23, this.formatAmount(totalNecessaryExpenses));
+            this.setCellText(mainTable, row, 28, this.formatAmount(result.capitalGains));
+            this.setCellText(mainTable, row, 41, this.formatAmount(result.incomeAmount));
+        }
+
+        // Section 5: 세액 계산 (row 26)
+        this.setCellText(mainTable, 26, 0, this.formatAmount(result.taxBaseTotal));
+        this.setCellText(mainTable, 26, 4, this.formatAmount(result.calculatedTax));
+        this.setCellText(mainTable, 26, 12, this.formatDisplayTaxRate(inputs, result, calculator));
+        this.setCellText(mainTable, 26, 37, this.formatAmount(result.totalTax));
+        this.setCellText(mainTable, 26, 45, this.formatInstallmentAmount(result.totalTax));
+        this.setCellText(mainTable, 26, 51, this.formatAmount(result.totalTax));
+
+        // Section 6: 필요경비 상세내역 (합계=row31, 주식1=row32)
+        for (const row of [31, 32]) {
+            this.setCellText(mainTable, row, 6, this.formatAmount(result.acquisitionCost));
+            this.setCellText(mainTable, row, 26, this.formatAmount(result.necessaryExpenses));
+            this.setCellText(mainTable, row, 40, this.formatAmount(totalNecessaryExpenses));
+        }
+
+        const serializer = new XMLSerializer();
+        const serialized = serializer.serializeToString(documentNode);
+        return serialized.startsWith('<?xml') ? serialized : `${xmlDeclaration}${serialized}`;
     }
 
     fillStandardSection(sectionXml, context) {
-        // 우선 원본 그대로 반환 (추후 HWPX 내부 표 위치 파악 후 채움 로직 작성)
-        return sectionXml;
+        const xmlDeclarationMatch = sectionXml.match(/^<\?xml[^>]+\?>\s*/);
+        const xmlDeclaration = xmlDeclarationMatch?.[0] || '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>';
+        const parser = new DOMParser();
+        const documentNode = parser.parseFromString(sectionXml, 'application/xml');
+
+        if (documentNode.getElementsByTagName('parsererror').length > 0) {
+            throw new Error('서식 XML을 해석하지 못했습니다.');
+        }
+
+        const mainTable = this.findTableByTexts(documentNode, ['성명', '주민등록번호', '납부할 세액']);
+
+        if (!mainTable) {
+            throw new Error('자동채움 대상 서식 위치를 찾지 못했습니다.');
+        }
+
+        const { inputs, result, calculator } = context;
+
+        // Section I: 신고인(양도인) 정보
+        this.setCellText(mainTable, 5, 5, inputs.sellerName || '');
+        this.setCellText(mainTable, 7, 5, inputs.address || '');
+
+        // Section II: 양수인 - 양도자산 소재지
+        this.setCellText(mainTable, 10, 11, inputs.address || '');
+
+        // Section III: 양도소득과세표준 및 세액 계산
+        // row 13: ③ 양도소득금액 (합계 col=5, 국내분 col=10)
+        this.setCellText(mainTable, 13, 5, this.formatAmount(result.incomeAmount));
+        this.setCellText(mainTable, 13, 10, this.formatAmount(result.incomeAmount));
+        // row 16: ⑦ 양도소득기본공제
+        this.setCellText(mainTable, 16, 5, this.formatAmount(result.basicDeductionTotal));
+        this.setCellText(mainTable, 16, 10, this.formatAmount(result.basicDeductionTotal));
+        // row 17: ⑧ 과세표준 = (③+④-⑥-⑦)
+        this.setCellText(mainTable, 17, 5, this.formatAmount(result.taxBaseTotal));
+        this.setCellText(mainTable, 17, 10, this.formatAmount(result.taxBaseTotal));
+        // row 18: ⑨ 세율
+        this.setCellText(mainTable, 18, 5, this.formatDisplayTaxRate(inputs, result, calculator));
+        // row 19: ⑩ 산출세액
+        this.setCellText(mainTable, 19, 5, this.formatAmount(result.calculatedTax));
+        this.setCellText(mainTable, 19, 10, this.formatAmount(result.calculatedTax));
+        // row 30: ⑱ 납부할 세액
+        this.setCellText(mainTable, 30, 5, this.formatAmount(result.totalTax));
+        this.setCellText(mainTable, 30, 10, this.formatAmount(result.totalTax));
+        // row 31: ⑲ 분납(물납)할 세액
+        this.setCellText(mainTable, 31, 5, this.formatInstallmentAmount(result.totalTax));
+        // row 32: ⑳ 납부세액
+        this.setCellText(mainTable, 32, 5, this.formatAmount(result.totalTax));
+        this.setCellText(mainTable, 32, 10, this.formatAmount(result.totalTax));
+
+        const serializer = new XMLSerializer();
+        const serialized = serializer.serializeToString(documentNode);
+        return serialized.startsWith('<?xml') ? serialized : `${xmlDeclaration}${serialized}`;
+    }
+
+    fillStandardAppendixSection(sectionXml, context) {
+        // 별지84 부표1: 양도소득금액 계산명세서 (section2.xml, 첫 번째 표)
+        const xmlDeclarationMatch = sectionXml.match(/^<\?xml[^>]+\?>\s*/);
+        const xmlDeclaration = xmlDeclarationMatch?.[0] || '<?xml version="1.0" encoding="UTF-8" standalone="yes" ?>';
+        const parser = new DOMParser();
+        const documentNode = parser.parseFromString(sectionXml, 'application/xml');
+
+        if (documentNode.getElementsByTagName('parsererror').length > 0) {
+            return sectionXml;
+        }
+
+        const calcTable = this.findTableByTexts(documentNode, ['양도소득금액 계산명세서', '양도가액', '양도차익']);
+
+        if (!calcTable) {
+            return sectionXml;
+        }
+
+        const { inputs, result, calculator } = context;
+        const taxableGains = result.taxableGains ?? result.capitalGains;
+        const nonTaxableGains = Math.max(0, (result.capitalGains || 0) - (taxableGains || 0));
+
+        // 거래일 정보 (첫 번째 거래 슬롯 col=11, 합계 col=8)
+        this.setCellText(calcTable, 10, 11, this.formatDate(inputs.sellDate, calculator));
+        this.setCellText(calcTable, 11, 11, this.formatDate(inputs.buyDate, calculator));
+
+        // 양도소득금액 계산 - 합계(col=8)와 첫 번째 거래(col=11)
+        for (const col of [8, 11]) {
+            this.setCellText(calcTable, 22, col, this.formatAmount(result.transferPrice));
+            this.setCellText(calcTable, 23, col, this.formatAmount(result.acquisitionCost));
+            this.setCellText(calcTable, 26, col, this.formatAmount(result.necessaryExpenses));
+            this.setCellText(calcTable, 27, col, this.formatAmount(result.capitalGains));
+            if (nonTaxableGains > 0) {
+                this.setCellText(calcTable, 28, col, this.formatAmount(nonTaxableGains));
+            }
+            this.setCellText(calcTable, 29, col, this.formatAmount(taxableGains));
+            this.setCellText(calcTable, 32, col, this.formatAmount(result.incomeAmount));
+        }
+        // 장기보유특별공제 (첫 번째 거래 슬롯만)
+        this.setCellText(calcTable, 30, 11, this.formatAmount(result.longTermDeduction));
+
+        const serializer = new XMLSerializer();
+        const serialized = serializer.serializeToString(documentNode);
+        return serialized.startsWith('<?xml') ? serialized : `${xmlDeclaration}${serialized}`;
     }
 
     async resolveArchiveSource(guide) {
