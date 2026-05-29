@@ -44,6 +44,11 @@ const TaxData = {
             message: '혼인으로 2주택이 된 경우는 2024년 11월 12일 이후 양도분부터 10년 특례 적용 여부를 함께 봐야 합니다.',
             documents: ['혼인관계증명서', '각 주택 취득일 증빙']
         },
+        cohabitation: {
+            label: '동거봉양 합가 특례',
+            message: '60세 이상 직계존속을 모시려고 세대를 합쳐 2주택이 된 경우(소득세법 시행령 §155④), 합가일로부터 10년 이내에 먼저 양도하는 주택은 1세대 1주택 비과세가 가능합니다. 합가 전 각자 1주택을 보유했고 양도 주택이 보유·거주 요건을 갖추어야 합니다.',
+            documents: ['가족관계증명서(직계존속 확인)', '주민등록표 등본(합가 사실·합가일 확인)', '각 주택 취득일 증빙']
+        },
         rental: {
             label: '임대사업자·거주주택 특례',
             message: '임대사업자 거주주택 비과세 특례(소득세법 시행령 §155⑳)는 양도일 현재 등록 유지, 의무임대기간 준수, 임대료 증액 5% 이하 제한을 모두 갖추어야 합니다. 요건 미충족 시 소급 추납 의무가 있으므로 양도 전 최종 확인이 필요합니다.',
@@ -354,6 +359,7 @@ class TaxCalculator {
             sellDate: rawInputs.sellDate || '',
             newHomeContractDate: rawInputs.newHomeContractDate || '',
             marriageDate: rawInputs.marriageDate || '',
+            cohabitationDate: rawInputs.cohabitationDate || '',
             inheritanceSaleType: rawInputs.inheritanceSaleType || '',
             inheritanceShareType: rawInputs.inheritanceShareType || '',
             inheritanceRuralHouseType: rawInputs.inheritanceRuralHouseType || '',
@@ -488,7 +494,7 @@ class TaxCalculator {
 
         // specialNonTaxable 경로가 아니어도 특례 케이스를 선택했으면 검토
         const specialCasesForCheck = inputs.specialCases || [];
-        const SPECIAL_CASE_KEYS = ['rental', 'marriage', 'inherited', 'winwin'];
+        const SPECIAL_CASE_KEYS = ['rental', 'marriage', 'cohabitation', 'inherited', 'winwin'];
         if (SPECIAL_CASE_KEYS.some(k => specialCasesForCheck.includes(k))) {
             return this.checkSpecialNonTaxable(inputs);
         }
@@ -528,6 +534,35 @@ class TaxCalculator {
                     isEligible: false,
                     needsReview: false,
                     message: `혼인합가일(${this.formatDate(marriageDate)})로부터 10년이 경과하여(기한: ${this.formatDate(deadline)}) 혼인 특례 비과세 요건을 충족하지 못했습니다.`
+                };
+            }
+        }
+
+        // ── 동거봉양 합가 특례 (소득세법 시행령 §155④) ──
+        if (specialCases.includes('cohabitation')) {
+            if (!inputs.cohabitationDate || !inputs.sellDate) {
+                return {
+                    isEligible: false,
+                    needsReview: true,
+                    message: '동거봉양 합가일 또는 양도일 정보가 부족하여 10년 특례 여부를 판정할 수 없습니다. 주민등록표 등본으로 합가일을 확인하세요.'
+                };
+            }
+            const cohabDate = this.toDate(inputs.cohabitationDate);
+            const sellDate = this.toDate(inputs.sellDate);
+            const deadline = new Date(cohabDate);
+            deadline.setFullYear(deadline.getFullYear() + 10);
+
+            if (sellDate <= deadline) {
+                return {
+                    isEligible: true,
+                    needsReview: true,
+                    message: `동거봉양 합가일(${this.formatDate(cohabDate)})로부터 10년 이내 양도에 해당합니다(소득세법 시행령 §155④). 합가 전 각자 1주택을 보유했고 양도 주택이 보유·거주 요건을 충족하면 비과세가 적용됩니다. 60세 이상 직계존속 동거봉양 요건을 전문가와 확인하세요.`
+                };
+            } else {
+                return {
+                    isEligible: false,
+                    needsReview: false,
+                    message: `동거봉양 합가일(${this.formatDate(cohabDate)})로부터 10년이 경과하여(기한: ${this.formatDate(deadline)}) 동거봉양 특례 비과세 요건을 충족하지 못했습니다.`
                 };
             }
         }
@@ -891,10 +926,9 @@ class TaxCalculator {
         }
 
         let progressiveRateObj;
-        if (inputs.type === 'right' && inputs.rightType === 'ticket' && years < 1) {
-            progressiveRateObj = { rate: 0.70, deduction: 0 };
-        } else if (inputs.type === 'right' && inputs.rightType === 'ticket' && years < 2) {
-            progressiveRateObj = { rate: 0.60, deduction: 0 };
+        if (inputs.type === 'right' && inputs.rightType === 'ticket') {
+            // 분양권은 보유기간과 무관하게 1년 미만 70%, 1년 이상 60% 고정 (소득세법 §104①4호)
+            progressiveRateObj = years < 1 ? { rate: 0.70, deduction: 0 } : { rate: 0.60, deduction: 0 };
         } else {
             progressiveRateObj = this.data.BASIC_RATES.find((bracket) => taxBase <= bracket.limit)
                 || this.data.BASIC_RATES[this.data.BASIC_RATES.length - 1];
@@ -1132,6 +1166,7 @@ class TaxCalculator {
 
         if (inputs.otherAssetCategory === 'complex') {
             cautions.push('복수 자산·특수 자산은 자산별 계산명세와 세율 검토가 따로 필요하므로 현재 계산값은 본표 요약 참고용으로 보세요.');
+            cautions.push('양도소득 기본공제 250만원은 부동산 등·주식·파생상품 등 소득 그룹별로 각각 적용됩니다. 같은 그룹 내 여러 건을 양도하면 연 250만원을 한 번만 공제하세요.');
         }
 
         if (inputs.type === 'stock') {
@@ -1287,6 +1322,12 @@ class TaxCalculator {
                     pass: null,
                     label: '혼인 특례 — 2주택 특례 비과세 검토',
                     detail: '혼인으로 인한 2주택, 혼인신고일 10년 이내 양도 시 특례 비과세 가능'
+                });
+            } else if (specialCases.includes('cohabitation')) {
+                checks.push({
+                    pass: null,
+                    label: '동거봉양 합가 특례 — 2주택 특례 비과세 검토 (§155④)',
+                    detail: '60세 이상 직계존속 동거봉양 합가, 합가일 10년 이내 양도 시 특례 비과세 가능'
                 });
             } else if (specialCases.includes('rental')) {
                 const isSaleOfRental = inputs.rentalSaleType === 'rental_property';

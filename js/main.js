@@ -93,6 +93,7 @@ class App {
             paidClearanceAmount: 0,    // 납부 청산금
             // 특례 비과세 관련
             marriageDate: '',          // 혼인합가일 (혼인 특례)
+            cohabitationDate: '',      // 동거봉양 합가일 (동거봉양 특례)
             inheritanceSaleType: '',       // 'inherited' | 'general' (상속 특례)
             inheritanceShareType: '',      // 'sole' | 'majority' | 'minority' (공동상속 지분)
             inheritanceRuralHouseType: '', // 'rural_5yr' | 'general' (농어촌주택 상속 여부)
@@ -162,37 +163,39 @@ class App {
         const cleanAddress = address.trim();
         const cleanDate = date.split(' ')[0]; // Handle YYYY-MM-DD formats
 
+        // 주소에 명시된 시/도 (없으면 null)
+        const CITY_KEYWORDS = ['서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종', '경기', '강원', '충북', '충청북도', '충남', '충청남도', '전북', '전라북도', '전남', '전라남도', '경북', '경상북도', '경남', '경상남도', '제주'];
+        const addressCity = CITY_KEYWORDS.find(region => cleanAddress.includes(region)) || null;
+
+        // 여러 시·도에 같은 이름이 있어 시/도 없이는 특정할 수 없는 구
+        const AMBIGUOUS_DISTRICTS = ['중구', '동구', '서구', '남구', '북구', '강서구'];
+
+        const inPeriod = (group) => group.periods.some(p => {
+            const end = p.end || '9999-12-31';
+            return cleanDate >= p.start && cleanDate <= end;
+        });
+
         for (const group of ADJUSTED_AREA_HISTORY) {
-            const cityMatch = cleanAddress.includes(group.city);
-            
-            // If districts are 'all', we MUST match the city.
-            if (group.districts === 'all') {
-                if (!cityMatch) continue;
-                // If it's 'all' and city matches, we consider it a match
-                const isAdjusted = group.periods.some(p => {
-                    const start = p.start;
-                    const end = p.end || '9999-12-31';
-                    return cleanDate >= start && cleanDate <= end;
-                });
-                return { status: 'detected', isAdjusted };
+            // 구 이름 매칭 ('성남시 분당구'처럼 시+구 복합이면 끝 토큰('분당구')도 허용)
+            const matchedDistrict = (group.districts || []).find(d => {
+                const tail = d.split(' ').pop();
+                return cleanAddress.includes(d) || cleanAddress.includes(tail);
+            });
+            if (!matchedDistrict) continue;
+
+            // 주소에 시/도가 명시돼 있으면 그룹의 시/도와 일치해야 매칭 (예: 부산 중구를 인천 중구로 오판 방지)
+            if (addressCity && addressCity !== group.city) continue;
+
+            // 시/도가 없는데 동명 구로만 걸린 경우는 어느 도시인지 특정 불가 → 직접 확인
+            if (!addressCity && AMBIGUOUS_DISTRICTS.includes(matchedDistrict.split(' ').pop())) {
+                return { status: 'unknown' };
             }
 
-            // Otherwise, we can match EITHER by (city AND district) OR just by a specific district name (since district names like '서초구', '분당구' are usually unique enough in this context)
-            const districtMatch = group.districts.some(d => cleanAddress.includes(d) || d.includes(cleanAddress.split(' ')[0]) || d.includes(cleanAddress.split(' ')[1] || '____'));
-
-            if (districtMatch || (cityMatch && group.districts === 'all')) {
-                const isAdjusted = group.periods.some(p => {
-                    const start = p.start;
-                    const end = p.end || '9999-12-31';
-                    return cleanDate >= start && cleanDate <= end;
-                });
-                return { status: 'detected', isAdjusted };
-            }
+            return { status: 'detected', isAdjusted: inPeriod(group) };
         }
 
-        // 주소에 대한민국 주요 지역 키워드가 포함되어 있다면, 위 조정대상지역 목록에 걸리지 않았으므로 조정대상지역이 아님(false)으로 자동 판별
-        const allRegions = ['서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종', '경기', '강원', '충북', '충청북도', '충남', '충청남도', '전북', '전라북도', '전남', '전라남도', '경북', '경상북도', '경남', '경상남도', '제주'];
-        if (allRegions.some(region => cleanAddress.includes(region))) {
+        // 시/도는 인식됐지만 조정대상 구에 걸리지 않음 → 비조정지역으로 추정
+        if (addressCity) {
             return { status: 'detected', isAdjusted: false };
         }
 
@@ -249,6 +252,7 @@ class App {
                             inputs.specialCases = [];
                             inputs.wasFormerMembershipRight = '';
                             inputs.marriageDate = '';
+                            inputs.cohabitationDate = '';
                             inputs.inheritanceSaleType = '';
                             inputs.inheritanceShareType = '';
                             inputs.propertySpecialCases = [];
@@ -331,6 +335,7 @@ class App {
                         onSelect: (inputs, value) => {
                             inputs.houseNonTaxableCategory = value;
                             inputs.marriageDate = '';
+                            inputs.cohabitationDate = '';
                             inputs.inheritanceSaleType = '';
                             inputs.inheritanceShareType = '';
                             inputs.propertySpecialCases = [];
@@ -660,8 +665,8 @@ class App {
                             const shownKeys = inputs.houseNonTaxableCategory === 'singleHome'
                                 ? ['unregistered', 'nonResident', 'demolishedBeforeSettlement']
                                 : inputs.houseNonTaxableCategory === 'specialNonTaxable'
-                                    ? ['marriage', 'inherited', 'rental', 'winwin', 'farm_officetel']
-                                    : ['inherited', 'marriage', 'winwin', 'farm_officetel'];
+                                    ? ['marriage', 'cohabitation', 'inherited', 'rental', 'winwin', 'farm_officetel']
+                                    : ['inherited', 'marriage', 'cohabitation', 'winwin', 'farm_officetel'];
                             const preserved = (inputs.specialCases || []).filter(v => !shownKeys.includes(v));
                             inputs.specialCases = [...preserved, ...values];
                         },
@@ -678,6 +683,7 @@ class App {
                                 // 보유 사정: 왜 집이 여러 채인지
                                 return [
                                     { label: '결혼 때문에 2주택이 된 경우', value: 'marriage' },
+                                    { label: '부모님(60세 이상)을 모시려고 합가해 2주택이 된 경우', value: 'cohabitation' },
                                     { label: '상속받은 집이 있어서 2주택 이상이 된 경우', value: 'inherited' },
                                     { label: '임대사업 등록 또는 거주주택 특례가 있는 경우', value: 'rental' },
                                     { label: '전세를 크게 올리지 않은 상생임대 특례 검토', value: 'winwin' },
@@ -687,6 +693,7 @@ class App {
                             return [
                                 { label: '상속받았거나 증여받은 집', value: 'inherited' },
                                 { label: '결혼 때문에 2주택이 된 경우', value: 'marriage' },
+                                { label: '부모님(60세 이상)을 모시려고 합가해 2주택이 된 경우', value: 'cohabitation' },
                                 { label: '전세를 크게 올리지 않은 상생임대 특례 검토', value: 'winwin' },
                                 { label: '오피스텔이나 농어촌주택을 함께 보유', value: 'farm_officetel' }
                             ];
@@ -818,6 +825,15 @@ class App {
                         helper: '혼인관계증명서의 신고일을 확인하세요. 10년 초과 여부는 입력하신 날짜와 양도일을 기준으로 자동 판정합니다.',
                         type: 'date_single',
                         condition: (inputs) => inputs.houseNonTaxableCategory === 'specialNonTaxable' && (inputs.specialCases || []).includes('marriage')
+                    },
+                    // ── 동거봉양 특례: 합가일 ──
+                    {
+                        id: 'cohabitationDate',
+                        title: '동거봉양 합가일이 언제인가요?',
+                        subtitle: '부모님(60세 이상 직계존속)을 모시기 위해 세대를 합친 날짜를 입력하세요. 합가 전에 각자 집 한 채씩 가지고 있다가 합가로 2주택이 된 경우, 합가일로부터 10년 이내에 먼저 양도하는 주택에 비과세 특례가 적용됩니다.',
+                        helper: '주민등록표 등본의 전입(합가)일을 확인하세요. 10년 초과 여부는 입력하신 날짜와 양도일을 기준으로 자동 판정합니다.',
+                        type: 'date_single',
+                        condition: (inputs) => inputs.houseNonTaxableCategory === 'specialNonTaxable' && (inputs.specialCases || []).includes('cohabitation')
                     },
                     // ── 상속 특례: 양도 주택 유형 ──
                     {
