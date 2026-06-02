@@ -157,13 +157,26 @@ class TaxCalculator {
             };
         }
 
-        const transferPrice = inputs.transferPrice;
+        // ── 토지·건물 분리 계산 (상가·일반 건물) ──
+        const isLandBuildingSplit = inputs.landBuildingSeparate
+            && inputs.assetCategory === 'other' && inputs.otherAssetCategory !== 'land';
+        const lbCalc = isLandBuildingSplit ? this.getLandBuildingCalc(inputs) : null;
+        if (lbCalc) {
+            // 합산 과세표준에 기본세율 적용(단기·중과·비교과세는 경고로 안내). 기본세율 유도를 위해 보유기간 보정
+            inputs.holdingPeriod = Math.max(inputs.landHoldingPeriod || 0, inputs.buildingHoldingPeriod || 0, 2);
+        }
+
+        const transferPrice = lbCalc ? lbCalc.transferPrice : inputs.transferPrice;
 
         let acquisitionCost = 0;
         let necessaryExpenses = inputs.necessaryExpenses;
         let acquisitionCalcDetail = '실지거래가액 적용';
 
-        if (inputs.acquisitionMethod === 'estimated') {
+        if (lbCalc) {
+            acquisitionCost = lbCalc.acquisitionCost;
+            necessaryExpenses = lbCalc.necessaryExpenses;
+            acquisitionCalcDetail = `토지·건물 분리 계산: 토지 취득가 ${this.formatCurrency(lbCalc.landAcq)}${lbCalc.landConverted ? '(환산)' : ''} + 건물 취득가 ${this.formatCurrency(lbCalc.buildingAcq)}${lbCalc.buildingConverted ? '(환산)' : ''}`;
+        } else if (inputs.acquisitionMethod === 'estimated') {
             if (inputs.transferTaxBase > 0 && inputs.acquisitionTaxBase > 0) {
                 acquisitionCost = Math.floor(
                     transferPrice * (inputs.acquisitionTaxBase / inputs.transferTaxBase)
@@ -189,7 +202,9 @@ class TaxCalculator {
         }
 
         let capitalGains;
-        if (redevCalc) {
+        if (lbCalc) {
+            capitalGains = lbCalc.totalGain;
+        } else if (redevCalc) {
             capitalGains = redevCalc.totalCapitalGains;
             acquisitionCalcDetail = `원조합원 분리 계산: 기존부동산부 ${this.formatCurrency(redevCalc.preApprovalGains)} + 권리부 ${this.formatCurrency(redevCalc.postApprovalGains)}`;
         } else if (isRedevOriginal || (inputs.type === 'right' && inputs.rightType === 'membership')) {
@@ -222,6 +237,11 @@ class TaxCalculator {
         let deductionRate = heavyTaxInfo.isApplicable ? 0 : this.getLongTermDeductionRate(inputs, isNonTaxable);
         let longTermDeduction = Math.floor(taxableGains * deductionRate);
 
+        // 토지·건물 분리: 장특공제를 토지/건물 각각 보유기간 기준으로 계산한 합계로 대체
+        if (lbCalc) {
+            deductionRate = lbCalc.blendedRate;
+            longTermDeduction = lbCalc.totalLTD;
+        }
         // 원조합원 분리 계산: 장특공제를 기존 부동산부 차익에만 적용
         if (redevCalc && !heavyTaxInfo.isApplicable) {
             deductionRate = redevCalc.deductionRate;
@@ -250,7 +270,14 @@ class TaxCalculator {
 
         const calculatedTax = calculatedTaxPerPerson * persons;
         const localTax = Math.floor(calculatedTax * 0.1);
-        const totalTax = calculatedTax + localTax;
+        // 환산취득가액 적용 가산세 (소득세법 §114의2): 신축·증축 건물을 5년 내 양도하며 환산취득가액 적용 시 그 5%
+        const conversionSurcharge = lbCalc
+            ? lbCalc.buildingSurcharge
+            : ((inputs.acquisitionMethod === 'estimated'
+                && inputs.buildingNewBuildWithin5yr === 'yes'
+                && acquisitionCost > 0)
+                ? Math.floor(acquisitionCost * 0.05) : 0);
+        const totalTax = calculatedTax + localTax + conversionSurcharge;
 
         let normalTotalTax = 0;
         if (heavyTaxInfo.isApplicable) {
@@ -307,6 +334,7 @@ class TaxCalculator {
             taxProgressiveDeduction: rateInfo.deduction,
             calculatedTax,
             localTax,
+            conversionSurcharge,
             totalTax,
             persons,
             isHeavyTaxApplicable: heavyTaxInfo.isApplicable,
@@ -319,7 +347,9 @@ class TaxCalculator {
             tempTwoHomeInfo: nonTaxableInfo.tempTwoHomeInfo || null,
             isMixedUse,
             mixedUseApportionment,
-            redevCalc
+            redevCalc,
+            isLandBuildingSplit,
+            lbCalc
         };
 
         result.nonTaxableChecklist = this.buildNonTaxableChecklist(inputs, result);
@@ -388,7 +418,27 @@ class TaxCalculator {
             rentalIsRegistered: rawInputs.rentalIsRegistered || '',
             rentalRegisteredBefore2020: rawInputs.rentalRegisteredBefore2020 || '',
             rentalPeriodType: rawInputs.rentalPeriodType || '',
-            rentalPriceCapMet: rawInputs.rentalPriceCapMet || ''
+            rentalPriceCapMet: rawInputs.rentalPriceCapMet || '',
+            // 환산취득가액 가산세 관련 (소득세법 §114의2)
+            buildingNewBuildWithin5yr: rawInputs.buildingNewBuildWithin5yr || '',
+            isNonBusinessLand: rawInputs.isNonBusinessLand || '',
+            // 토지·건물 분리 계산 관련
+            landBuildingSeparate: Boolean(rawInputs.landBuildingSeparate),
+            priceInputMode: rawInputs.priceInputMode || 'separate',
+            landTransferPrice: Number(rawInputs.landTransferPrice || 0),
+            buildingTransferPrice: Number(rawInputs.buildingTransferPrice || 0),
+            landStdAtSell: Number(rawInputs.landStdAtSell || 0),
+            buildingStdAtSell: Number(rawInputs.buildingStdAtSell || 0),
+            landAcqMethod: rawInputs.landAcqMethod || 'real',
+            buildingAcqMethod: rawInputs.buildingAcqMethod || 'real',
+            landAcqPrice: Number(rawInputs.landAcqPrice || 0),
+            buildingAcqPrice: Number(rawInputs.buildingAcqPrice || 0),
+            landStdAtAcq: Number(rawInputs.landStdAtAcq || 0),
+            buildingStdAtAcq: Number(rawInputs.buildingStdAtAcq || 0),
+            landHoldingPeriod: Number(rawInputs.landHoldingPeriod || 0),
+            buildingHoldingPeriod: Number(rawInputs.buildingHoldingPeriod || 0),
+            landExpenses: Number(rawInputs.landExpenses || 0),
+            buildingExpenses: Number(rawInputs.buildingExpenses || 0)
         };
 
         // 승계조합원 완공 후 양도 → 사실상 주택 양도로 취급, 보유기간 준공일부터 재산정
@@ -870,6 +920,99 @@ class TaxCalculator {
         };
     }
 
+    // 토지·건물 분리 계산 (상가·일반 건물): 양도가액 안분, 토지/건물 각각 취득가액(실가/환산)·장기보유특별공제
+    getLandBuildingCalc(inputs) {
+        const ltdRate = (yrs) => {
+            const y = Math.floor(yrs || 0);
+            if (y < 3) return 0;
+            return Number(Math.min(y * this.data.LONG_TERM_GENERAL.RATE_PER_YEAR, this.data.LONG_TERM_GENERAL.MAX_RATE).toFixed(2));
+        };
+
+        // 1. 양도가액 토지/건물 분리
+        let landTP, buildingTP, apportioned = false, stdDiffWarn = false;
+        const lStdSell = inputs.landStdAtSell, bStdSell = inputs.buildingStdAtSell;
+        if (inputs.priceInputMode === 'lumped') {
+            const totStd = lStdSell + bStdSell;
+            if (totStd > 0) {
+                landTP = Math.floor(inputs.transferPrice * lStdSell / totStd);
+                buildingTP = inputs.transferPrice - landTP;
+                apportioned = true;
+            } else {
+                landTP = inputs.transferPrice;
+                buildingTP = 0;
+            }
+        } else {
+            landTP = inputs.landTransferPrice || 0;
+            buildingTP = inputs.buildingTransferPrice || 0;
+            // 구분기재액이 기준시가 안분액과 30% 이상 차이나면 구분기장 부인 (소득령 §166)
+            if (lStdSell > 0 && bStdSell > 0) {
+                const total = landTP + buildingTP;
+                if (total > 0) {
+                    const stdLandTP = total * lStdSell / (lStdSell + bStdSell);
+                    if (Math.abs(landTP - stdLandTP) / total >= 0.30) stdDiffWarn = true;
+                }
+            }
+        }
+
+        // 2. 취득가액 (토지/건물 각각 실가 또는 환산)
+        const calcAcq = (method, tp, acqPrice, stdAtAcq, stdAtSell) => {
+            if (method === 'estimated' && stdAtAcq > 0 && stdAtSell > 0) {
+                return {
+                    acq: Math.floor(tp * stdAtAcq / stdAtSell),
+                    gae: Math.floor(stdAtAcq * 0.03), // 개산공제 (취득 기준시가의 3%)
+                    converted: true
+                };
+            }
+            return { acq: acqPrice || 0, gae: 0, converted: false };
+        };
+        const land = calcAcq(inputs.landAcqMethod, landTP, inputs.landAcqPrice, inputs.landStdAtAcq, lStdSell);
+        const building = calcAcq(inputs.buildingAcqMethod, buildingTP, inputs.buildingAcqPrice, inputs.buildingStdAtAcq, bStdSell);
+
+        // 3. 필요경비 (환산이면 개산공제, 실가면 입력 경비)
+        const landExp = land.converted ? land.gae : (inputs.landExpenses || 0);
+        const buildingExp = building.converted ? building.gae : (inputs.buildingExpenses || 0);
+
+        // 4. 양도차익
+        const landGain = Math.max(0, landTP - land.acq - landExp);
+        const buildingGain = Math.max(0, buildingTP - building.acq - buildingExp);
+
+        // 5. 장기보유특별공제 (각 보유기간 기준, 일반 연 2% 최대 30%)
+        const landRate = ltdRate(inputs.landHoldingPeriod);
+        const buildingRate = ltdRate(inputs.buildingHoldingPeriod);
+        const landLTD = Math.floor(landGain * landRate);
+        const buildingLTD = Math.floor(buildingGain * buildingRate);
+
+        // 6. 양도소득금액
+        const landIncome = Math.max(0, landGain - landLTD);
+        const buildingIncome = Math.max(0, buildingGain - buildingLTD);
+        const totalGain = landGain + buildingGain;
+        const totalLTD = landLTD + buildingLTD;
+        const totalIncome = landIncome + buildingIncome;
+
+        // 7. 건물 신축·증축 5년 내 환산취득 → 가산세 5% (§114의2, 건물분 환산가액 기준)
+        const buildingSurcharge = (building.converted && inputs.buildingNewBuildWithin5yr === 'yes')
+            ? Math.floor(building.acq * 0.05) : 0;
+
+        const blendedRate = totalGain > 0 ? Number((totalLTD / totalGain).toFixed(4)) : 0;
+
+        return {
+            landTP, buildingTP,
+            landAcq: land.acq, buildingAcq: building.acq,
+            landConverted: land.converted, buildingConverted: building.converted,
+            landExp, buildingExp,
+            landGain, buildingGain,
+            landRate, buildingRate, landLTD, buildingLTD,
+            landIncome, buildingIncome,
+            totalGain, totalLTD, totalIncome, blendedRate,
+            transferPrice: landTP + buildingTP,
+            acquisitionCost: land.acq + building.acq,
+            necessaryExpenses: landExp + buildingExp,
+            apportioned, stdDiffWarn, buildingSurcharge,
+            shortTermWarn: (inputs.landHoldingPeriod < 2 || inputs.buildingHoldingPeriod < 2),
+            nonBusinessLandWarn: inputs.isNonBusinessLand === 'yes' || inputs.isNonBusinessLand === 'unknown'
+        };
+    }
+
     getLongTermDeductionRate(inputs, isNonTaxable1Home) {
         if (inputs.type === 'stock') return 0;
         if (inputs.type === 'right') {
@@ -1164,6 +1307,14 @@ class TaxCalculator {
             cautions.push('환산취득가액은 실제 증빙이 없을 때의 보조 계산입니다. 실제 신고 세액과 차이가 날 수 있습니다.');
         }
 
+        if (inputs.acquisitionMethod === 'estimated' && inputs.assetCategory === 'other' && inputs.otherAssetCategory !== 'land') {
+            cautions.push('토지 취득가액이 실지거래가액으로 확인된다면, 토지는 실가로 신고하고 건물만 환산취득가액을 적용하는 것이 원칙입니다. 환산취득가액이 실제 취득가액보다 과대하면 과세관청이 부인할 수 있으니 취득 증빙을 확인하세요.');
+        }
+
+        if (result.conversionSurcharge > 0) {
+            cautions.push(`신축·증축 건물을 5년 이내 양도하며 환산취득가액을 적용해, 환산취득가액의 5%인 ${this.formatCurrency(result.conversionSurcharge)}이 가산세로 부과됩니다(소득세법 §114의2). 현재 계산은 전체 환산취득가액 기준이므로, 토지가 포함돼 있다면 건물분 환산가액만으로 다시 계산해야 정확합니다.`);
+        }
+
         if (inputs.otherAssetCategory === 'complex') {
             cautions.push('복수 자산·특수 자산은 자산별 계산명세와 세율 검토가 따로 필요하므로 현재 계산값은 본표 요약 참고용으로 보세요.');
             cautions.push('양도소득 기본공제 250만원은 부동산 등·주식·파생상품 등 소득 그룹별로 각각 적용됩니다. 같은 그룹 내 여러 건을 양도하면 연 250만원을 한 번만 공제하세요.');
@@ -1209,6 +1360,15 @@ class TaxCalculator {
 
         if (inputs.specialCases.includes('mixed_use_building') && inputs.transferPrice > 1200000000) {
             cautions.push('12억 초과 고가 상가주택은 주택/상가 면적에 상관없이 상가 부분을 분리하여 별도 과세해야 하므로 정확한 안분 계산이 필수입니다.');
+        }
+
+        if (result.lbCalc) {
+            const lb = result.lbCalc;
+            cautions.push(`토지·건물을 나누어 계산했습니다 — 토지 양도차익 ${this.formatCurrency(lb.landGain)}(장특공제 ${Math.round(lb.landRate * 100)}%), 건물 양도차익 ${this.formatCurrency(lb.buildingGain)}(장특공제 ${Math.round(lb.buildingRate * 100)}%).`);
+            if (lb.apportioned) cautions.push('일괄 양도가액을 양도 당시 기준시가 비율로 토지·건물에 안분했습니다.');
+            if (lb.stdDiffWarn) cautions.push('계약서상 토지·건물 구분금액이 기준시가 안분액과 30% 이상 차이납니다. 세법상 기준시가 안분액을 실지거래가액으로 보아 재계산될 수 있습니다(소득세법 시행령 §166).');
+            if (lb.shortTermWarn) cautions.push('토지 또는 건물의 보유기간이 2년 미만입니다. 단기보유 세율(1년 미만 50%, 1~2년 40%)이 적용될 수 있어 현재 기본세율 계산과 달라질 수 있습니다. 전문가 확인이 필요합니다.');
+            if (lb.nonBusinessLandWarn) cautions.push('비사업용 토지에 해당하면 토지분 세율에 10%p가 가산될 수 있습니다. 현재 계산은 기본세율 기준이므로 별도 확인이 필요합니다.');
         }
 
         return [...new Set(cautions)];
@@ -1586,11 +1746,24 @@ class TaxCalculator {
                     : '')
         });
 
+        // 환산취득가액 가산세 (소득세법 §114의2)
+        if (result.conversionSurcharge > 0) {
+            steps.push({
+                step: stepNum + 2,
+                label: '환산취득가액 가산세 (소득세법 §114의2)',
+                formula: `환산취득가액 ${fmt(result.acquisitionCost)} × 5%`,
+                result: `+${fmt(result.conversionSurcharge)}`,
+                note: '신축·증축 건물을 5년 이내 양도하며 환산취득가액을 적용해 부과됩니다. 토지가 포함된 환산가액이면 건물분만으로 다시 계산이 필요합니다.'
+            });
+        }
+
         // Step 7: 지방소득세 포함 최종 세액
         steps.push({
-            step: stepNum + 2,
+            step: result.conversionSurcharge > 0 ? stepNum + 3 : stepNum + 2,
             label: '총 납부세액 (지방소득세 10% 포함)',
-            formula: `${fmt(result.calculatedTax)} + ${fmt(result.localTax)}`,
+            formula: result.conversionSurcharge > 0
+                ? `${fmt(result.calculatedTax)} + ${fmt(result.localTax)} + 가산세 ${fmt(result.conversionSurcharge)}`
+                : `${fmt(result.calculatedTax)} + ${fmt(result.localTax)}`,
             result: fmt(result.totalTax),
             note: '양도일이 속하는 달의 말일부터 2개월 이내에 예정신고 필요'
         });

@@ -601,6 +601,7 @@ class App {
                         title: '명의 형태는 어떻게 되나요?',
                         subtitle: '공동명의는 50:50으로 단순 가정해 계산합니다.',
                         type: 'button',
+                        condition: (inputs) => inputs.assetCategory !== 'other',
                         options: [
                             {
                                 label: '단독명의',
@@ -1094,6 +1095,19 @@ class App {
                         ]
                     },
                     {
+                        id: 'landBuildingSeparate',
+                        title: '이 부동산을 토지와 건물로 나누어 계산할까요?',
+                        subtitle: '토지와 건물은 취득시기·취득가액 산정방법이 다른 경우가 많아, 나누어 계산하면 더 정확합니다.',
+                        helper: '예: 토지는 오래전에 사서 실제 취득가액을 알고, 건물은 신축해서 취득가액 증빙이 없는 경우. 나누면 토지=실가, 건물=환산처럼 각각 적용하고 보유기간도 따로 반영합니다. 잘 모르겠으면 "아니오"로 전체를 한 번에 계산해도 됩니다.',
+                        type: 'button',
+                        condition: (inputs) => inputs.assetCategory === 'other' && inputs.otherAssetCategory !== 'land',
+                        onSelect: (inputs, value) => { inputs.landBuildingSeparate = value; },
+                        options: [
+                            { label: '예, 토지와 건물을 나누어 계산할게요', detail: '토지/건물 각각 양도가·취득가·보유기간 입력', value: true, icon: '분' },
+                            { label: '아니오, 전체를 한 번에 계산할게요', detail: '기존 방식 (단일 금액)', value: false, icon: '전' }
+                        ]
+                    },
+                    {
                         id: 'acquisitionMethod',
                         title: (inputs) => {
                             if (inputs.assetCategory === 'house') return '이번에 양도하는 주택(파는 집)을 과거에 취득하실 때 작성했던 매매계약서가 있으신가요?';
@@ -1103,7 +1117,7 @@ class App {
                         },
                         subtitle: '실제 얼마에 샀는지 증명할 수 있는 계약서가 있으면 "예"를 고르세요.',
                         type: 'button',
-                        condition: (inputs) => inputs.assetCategory !== 'stock',
+                        condition: (inputs) => inputs.assetCategory !== 'stock' && !inputs.landBuildingSeparate,
                         options: [
                             { label: '예, 계약서가 있어요', detail: '실지거래가액 계산 (실제 산 금액 적용)', value: 'real', icon: '실' },
                             { label: '아니오, 계약서를 분실했어요', detail: '환산취득가액 계산 (나라가 정한 기준시가 기준)', value: 'estimated', icon: '환' }
@@ -1112,11 +1126,13 @@ class App {
                     {
                         id: 'price_transfer',
                         title: (inputs) => inputs.isJointOwnership ? '부동산 전체를 얼마에 양도하셨나요?' : '얼마에 양도하셨나요?',
-                        subtitle: (inputs) => inputs.isJointOwnership 
+                        subtitle: (inputs) => inputs.assetCategory === 'other'
+                            ? '양수인에게 받은 실제 금액을 입력해주세요. 공유 부동산의 지분 일부만 양도했다면, 본인 지분에 해당하는 금액만 입력하면 됩니다. 단위는 만원입니다.'
+                            : inputs.isJointOwnership
                             ? '계약서상 부동산 전체의 실제 양도가액을 입력해주세요. (세금은 50:50 지분으로 알아서 나누어 계산합니다. 단위: 만원)'
                             : '양수인에게 받은 실제 금액을 입력해주세요. 단위는 만원입니다.',
                         type: 'currency_group',
-                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real',
+                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real' && !inputs.landBuildingSeparate,
                         fields: (inputs) => [
                             { id: 'transferPrice', label: inputs.isJointOwnership ? '부동산 전체 양도가액' : '양도가액' }
                         ]
@@ -1157,11 +1173,13 @@ class App {
                     {
                         id: 'price_acquisition_detail',
                         title: (inputs) => inputs.isJointOwnership ? '부동산 전체의 취득 비용을 입력해주세요.' : '취득에 들어간 비용을 입력해주세요.',
-                        subtitle: (inputs) => inputs.isJointOwnership
+                        subtitle: (inputs) => inputs.assetCategory === 'other'
+                            ? '본인 지분에 해당하는 취득가액과 취득세, 중개수수료 등을 입력해주세요. 공유 지분 일부만 양도했다면 그 지분만큼의 금액을 넣으면 됩니다. 비워두면 0원으로 처리합니다. 단위는 만원입니다.'
+                            : inputs.isJointOwnership
                             ? '계약서상 부동산 전체의 순수 취득가액과 취득세, 중개수수료 등을 입력해주세요. (세금은 50:50 지분으로 알아서 나누어 계산합니다. 단위: 만원)'
                             : '순수 취득가액 다음에 취득세 등(등기비용 포함), 중개수수료, 법무사 수수료를 입력합니다. 비워두면 0원으로 처리합니다. 단위는 만원입니다.',
                         type: 'currency_group',
-                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real',
+                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real' && !inputs.landBuildingSeparate,
                         fields: (inputs) => {
                             let acqLabel = '순수 취득가액';
                             if (inputs.assetCategory === 'right' && inputs.rightType === 'membership') {
@@ -1217,12 +1235,14 @@ class App {
                     },
                     {
                         id: 'price_expenses_detail',
-                        title: (inputs) => inputs.isJointOwnership ? '부동산 전체의 양도 비용과 큰 수리비용이 있었나요?' : '집을 팔 때 들었던 비용과 큰 수리비용이 있었나요?',
-                        subtitle: (inputs) => inputs.isJointOwnership
+                        title: (inputs) => inputs.assetCategory === 'other' ? '양도 비용과 큰 수리비용이 있었나요?' : inputs.isJointOwnership ? '부동산 전체의 양도 비용과 큰 수리비용이 있었나요?' : '집을 팔 때 들었던 비용과 큰 수리비용이 있었나요?',
+                        subtitle: (inputs) => inputs.assetCategory === 'other'
+                            ? '본인 지분에 해당하는 필요경비(중개수수료, 세무대리비, 자본적 지출 수리비 등)를 입력해주세요. 공유 지분 일부만 양도했다면 그 지분만큼만 넣으면 됩니다. 단위는 만원입니다.'
+                            : inputs.isJointOwnership
                             ? '부동산 전체 기준의 필요경비(중개수수료, 세무대리비, 자본적 지출 수리비 등)를 입력해주세요. 지분별 안분은 자동 적용됩니다. 단위는 만원입니다.'
                             : '베란다 확장, 보일러 교체, 샷시 설치 등 뼈대를 고친 큰 수리비용(자본적 지출)만 세금에서 빼줍니다. (도배, 장판 교체 등 단순 수리비는 제외됩니다) 영수증이 있어야 인정됩니다. 단위는 만원입니다.',
                         type: 'currency_group',
-                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real',
+                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'real' && !inputs.landBuildingSeparate,
                         fields: (inputs) => [
                             {
                                 id: 'sellBrokerFee',
@@ -1288,11 +1308,164 @@ class App {
                             ? '부동산 전체의 양도가액과 기준시가를 입력해주세요. 지분 계산은 자동으로 이루어집니다. 단위는 만원입니다.'
                             : '취득가액 증빙이 없을 때의 단순 계산입니다. 단위는 만원입니다.',
                         type: 'currency_group',
-                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'estimated',
+                        condition: (inputs) => inputs.assetCategory !== 'stock' && inputs.acquisitionMethod === 'estimated' && !inputs.landBuildingSeparate,
                         fields: (inputs) => [
                             { id: 'transferPrice', label: inputs.isJointOwnership ? '부동산 전체 양도가액' : '양도가액' },
                             { id: 'transferTaxBase', label: '양도 당시 기준시가 (전체 기준)' },
                             { id: 'acquisitionTaxBase', label: '취득 당시 기준시가 (전체 기준)' }
+                        ]
+                    },
+                    {
+                        id: 'buildingNewBuildWithin5yr',
+                        title: '이 건물을 직접 신축하거나 증축하셨고, 그날부터 5년 이내에 양도하시나요?',
+                        subtitle: '증축은 늘어난 바닥면적 합계가 85㎡를 초과하는 경우만 해당합니다.',
+                        helper: '소득세법 §114의2: 신축·증축한 건물을 5년 이내에 양도하면서 환산취득가액(또는 감정가액)을 취득가액으로 적용하면, 그 환산취득가액의 5%가 가산세로 부과됩니다. 토지만 양도했거나 신축·증축 후 5년이 지났다면 "아니오"를 선택하세요.',
+                        type: 'button',
+                        condition: (inputs) => inputs.assetCategory === 'other' && inputs.otherAssetCategory !== 'land' && inputs.acquisitionMethod === 'estimated' && !inputs.landBuildingSeparate,
+                        options: [
+                            { label: '예, 신축·증축 후 5년 이내 양도예요', detail: '환산취득가액의 5% 가산세 대상 (소득세법 §114의2)', value: 'yes', icon: '⚠' },
+                            { label: '아니오 / 해당 없음', detail: '토지만 양도, 5년 경과, 또는 신축·증축이 아님', value: 'no', icon: '아' }
+                        ]
+                    },
+                    // ── 토지·건물 분리: 양도가액 구분 여부 ──
+                    {
+                        id: 'priceInputMode',
+                        title: '계약서에 토지와 건물의 양도금액이 따로 적혀 있나요?',
+                        subtitle: '구분돼 있으면 각각 입력하고, 한 덩어리면 양도 당시 기준시가로 자동 안분해 드립니다.',
+                        helper: '소득세법 시행령 §166: 구분 기재된 가액이 원칙이며, 구분이 불분명하면 기준시가 비율로 안분합니다. 구분 기재액이 기준시가 안분액과 30% 이상 차이나면 안분액을 적용합니다.',
+                        type: 'button',
+                        condition: (inputs) => inputs.landBuildingSeparate === true,
+                        onSelect: (inputs, value) => { inputs.priceInputMode = value; },
+                        options: [
+                            { label: '예, 토지·건물 금액이 구분돼 있어요', detail: '토지/건물 양도가액 각각 입력', value: 'separate', icon: '구' },
+                            { label: '아니오, 한 덩어리 금액이에요', detail: '일괄 양도가액 + 기준시가로 안분', value: 'lumped', icon: '일' }
+                        ]
+                    },
+                    {
+                        id: 'lb_transfer_separate',
+                        title: '토지와 건물의 양도가액을 각각 입력해주세요.',
+                        subtitle: '계약서에 적힌 토지·건물 각각의 양도금액입니다. 기준시가는 30% 차이 검증에만 쓰여 선택 입력입니다. 단위는 만원입니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.priceInputMode === 'separate',
+                        fields: [
+                            { id: 'landTransferPrice', label: '토지 양도가액' },
+                            { id: 'buildingTransferPrice', label: '건물 양도가액' },
+                            { id: 'landStdAtSell', label: '(선택) 양도 당시 토지 기준시가' },
+                            { id: 'buildingStdAtSell', label: '(선택) 양도 당시 건물 기준시가' }
+                        ]
+                    },
+                    {
+                        id: 'lb_transfer_lumped',
+                        title: '전체 양도가액과 양도 당시 토지·건물 기준시가를 입력해주세요.',
+                        subtitle: '전체 금액을 기준시가 비율로 토지/건물에 안분합니다. 단위는 만원입니다.',
+                        helper: '기준시가는 국세청 홈택스·국토교통부 부동산공시가격에서 확인할 수 있습니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.priceInputMode === 'lumped',
+                        fields: [
+                            { id: 'transferPrice', label: '전체 양도가액 (토지+건물)' },
+                            { id: 'landStdAtSell', label: '양도 당시 토지 기준시가' },
+                            { id: 'buildingStdAtSell', label: '양도 당시 건물 기준시가' }
+                        ]
+                    },
+                    // ── 토지 취득 ──
+                    {
+                        id: 'landAcqMethod',
+                        title: '토지의 취득가액을 어떻게 정할까요?',
+                        subtitle: '토지 취득 계약서가 있으면 실지거래가액, 없으면 환산취득가액을 선택하세요.',
+                        type: 'button',
+                        condition: (inputs) => inputs.landBuildingSeparate === true,
+                        onSelect: (inputs, value) => { inputs.landAcqMethod = value; },
+                        options: [
+                            { label: '실지거래가액 (계약서 있음)', detail: '실제 취득금액 적용', value: 'real', icon: '실' },
+                            { label: '환산취득가액 (계약서 없음)', detail: '기준시가로 환산', value: 'estimated', icon: '환' }
+                        ]
+                    },
+                    {
+                        id: 'lb_land_real',
+                        title: '토지 취득가액과 필요경비를 입력해주세요.',
+                        subtitle: '토지 실제 취득가액(취득세·등기비 포함)과 토지분 필요경비입니다. 단위는 만원입니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.landAcqMethod === 'real',
+                        fields: [
+                            { id: 'landAcqPrice', label: '토지 취득가액 (취득세·등기비 포함)' },
+                            { id: 'landExpenses', label: '토지분 필요경비 (중개수수료 등, 없으면 0)' }
+                        ]
+                    },
+                    {
+                        id: 'lb_land_estimated',
+                        title: '토지의 취득·양도 당시 기준시가를 입력해주세요.',
+                        subtitle: '환산취득가액 = 토지 양도가액 × (취득 기준시가 ÷ 양도 기준시가). 단위는 만원입니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.landAcqMethod === 'estimated',
+                        fields: (inputs) => {
+                            const f = [{ id: 'landStdAtAcq', label: '토지 취득 당시 기준시가' }];
+                            if (inputs.priceInputMode !== 'lumped') f.push({ id: 'landStdAtSell', label: '토지 양도 당시 기준시가' });
+                            return f;
+                        }
+                    },
+                    {
+                        id: 'landHoldingPeriod',
+                        title: '토지의 보유기간은 얼마나 되나요?',
+                        subtitle: '토지 취득일부터 양도일까지의 기간입니다. 장기보유특별공제(3년 이상 연 2%, 최대 30%)에 반영됩니다.',
+                        type: 'range',
+                        condition: (inputs) => inputs.landBuildingSeparate === true,
+                        min: 0, max: 30, unit: '년', defaultValue: 3
+                    },
+                    // ── 건물 취득 ──
+                    {
+                        id: 'buildingAcqMethod',
+                        title: '건물의 취득가액을 어떻게 정할까요?',
+                        subtitle: '건물 취득(신축) 증빙이 있으면 실지거래가액, 없으면 환산취득가액을 선택하세요.',
+                        type: 'button',
+                        condition: (inputs) => inputs.landBuildingSeparate === true,
+                        onSelect: (inputs, value) => { inputs.buildingAcqMethod = value; },
+                        options: [
+                            { label: '실지거래가액 (증빙 있음)', detail: '실제 취득(신축)금액 적용', value: 'real', icon: '실' },
+                            { label: '환산취득가액 (증빙 없음)', detail: '기준시가로 환산', value: 'estimated', icon: '환' }
+                        ]
+                    },
+                    {
+                        id: 'lb_building_real',
+                        title: '건물 취득가액과 필요경비를 입력해주세요.',
+                        subtitle: '건물 실제 취득(신축)가액과 건물분 필요경비(자본적 지출 등)입니다. 단위는 만원입니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.buildingAcqMethod === 'real',
+                        fields: [
+                            { id: 'buildingAcqPrice', label: '건물 취득가액 (취득세·등기비 포함)' },
+                            { id: 'buildingExpenses', label: '건물분 필요경비 (자본적 지출 등, 없으면 0)' }
+                        ]
+                    },
+                    {
+                        id: 'lb_building_estimated',
+                        title: '건물의 취득·양도 당시 기준시가를 입력해주세요.',
+                        subtitle: '환산취득가액 = 건물 양도가액 × (취득 기준시가 ÷ 양도 기준시가). 단위는 만원입니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.buildingAcqMethod === 'estimated',
+                        fields: (inputs) => {
+                            const f = [{ id: 'buildingStdAtAcq', label: '건물 취득 당시 기준시가' }];
+                            if (inputs.priceInputMode !== 'lumped') f.push({ id: 'buildingStdAtSell', label: '건물 양도 당시 기준시가' });
+                            return f;
+                        }
+                    },
+                    {
+                        id: 'buildingHoldingPeriod',
+                        title: '건물의 보유기간은 얼마나 되나요?',
+                        subtitle: '건물 취득일(신축은 사용승인일)부터 양도일까지의 기간입니다. 토지와 다를 수 있어 따로 입력합니다.',
+                        type: 'range',
+                        condition: (inputs) => inputs.landBuildingSeparate === true,
+                        min: 0, max: 30, unit: '년', defaultValue: 3
+                    },
+                    {
+                        id: 'buildingNewBuild5yrSeparate',
+                        title: '건물을 직접 신축·증축하고, 그날부터 5년 이내에 양도하시나요?',
+                        subtitle: '증축은 늘어난 바닥면적 합계가 85㎡를 초과하는 경우만 해당합니다.',
+                        helper: '소득세법 §114의2: 신축·증축 건물을 5년 이내 양도하며 환산취득가액을 적용하면 건물 환산취득가액의 5%가 가산세로 부과됩니다.',
+                        type: 'button',
+                        condition: (inputs) => inputs.landBuildingSeparate === true && inputs.buildingAcqMethod === 'estimated',
+                        onSelect: (inputs, value) => { inputs.buildingNewBuildWithin5yr = value; },
+                        options: [
+                            { label: '예, 신축·증축 후 5년 이내 양도예요', detail: '건물 환산취득가액의 5% 가산세', value: 'yes', icon: '⚠' },
+                            { label: '아니오 / 해당 없음', detail: '5년 경과 또는 신축·증축이 아님', value: 'no', icon: '아' }
                         ]
                     },
                     {
