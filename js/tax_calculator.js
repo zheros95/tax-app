@@ -253,7 +253,9 @@ class TaxCalculator {
 
         const persons = inputs.isJointOwnership ? 2 : 1;
         const incomePerPerson = inputs.isJointOwnership ? Math.floor(incomeAmount / 2) : incomeAmount;
-        const basicDeductionPerPerson = Math.min(incomePerPerson, this.data.BASIC_DEDUCTION);
+        // 미등기 양도자산은 양도소득기본공제(250만원)도 배제 (소득세법 §103①)
+        const isUnregistered = (inputs.specialCases || []).includes('unregistered');
+        const basicDeductionPerPerson = isUnregistered ? 0 : Math.min(incomePerPerson, this.data.BASIC_DEDUCTION);
         const taxBasePerPerson = Math.max(0, incomePerPerson - basicDeductionPerPerson);
 
         const rateInfo = this.getTaxRate(
@@ -269,7 +271,10 @@ class TaxCalculator {
         );
 
         const calculatedTax = calculatedTaxPerPerson * persons;
-        const localTax = Math.floor(calculatedTax * 0.1);
+        // ── 세액감면 (8년 자경농지 감면 등, 조세특례제한법) ──
+        const taxReduction = this.getTaxReduction(inputs, calculatedTax);
+        const decisionTax = Math.max(0, calculatedTax - taxReduction.amount);
+        const localTax = Math.floor(decisionTax * 0.1);
         // 환산취득가액 적용 가산세 (소득세법 §114의2): 신축·증축 건물을 5년 내 양도하며 환산취득가액 적용 시 그 5%
         const conversionSurcharge = lbCalc
             ? lbCalc.buildingSurcharge
@@ -277,7 +282,7 @@ class TaxCalculator {
                 && inputs.buildingNewBuildWithin5yr === 'yes'
                 && acquisitionCost > 0)
                 ? Math.floor(acquisitionCost * 0.05) : 0);
-        const totalTax = calculatedTax + localTax + conversionSurcharge;
+        const totalTax = decisionTax + localTax + conversionSurcharge;
 
         let normalTotalTax = 0;
         if (heavyTaxInfo.isApplicable) {
@@ -333,6 +338,8 @@ class TaxCalculator {
             taxRate: rateInfo.rate,
             taxProgressiveDeduction: rateInfo.deduction,
             calculatedTax,
+            taxReduction,
+            decisionTax,
             localTax,
             conversionSurcharge,
             totalTax,
@@ -352,11 +359,30 @@ class TaxCalculator {
             lbCalc
         };
 
+        result.carryoverApplied = inputs._carryoverApplied || false;
+        result.carryoverPeriodYears = inputs._carryoverPeriodYears || 0;
+        result.landLimitInfo = (inputs.type === 'house' && (inputs.specialCases || []).includes('large_land_house'))
+            ? this.getResidentialLandLimit(inputs)
+            : null;
+
         result.nonTaxableChecklist = this.buildNonTaxableChecklist(inputs, result);
         result.calculationSteps = this.buildCalculationSteps(inputs, result);
         result.analysis = this.buildCaseAnalysis(inputs, result);
         result.scenarios = this.buildScenarios(inputs, result);
         result.filingGuide = this.buildFilingGuide(inputs, result);
+
+        // ── 이월과세 부인 비교 (소득세법 §97의2②): 적용 세액이 미적용 세액보다 적으면 미적용 ──
+        if (inputs._carryoverApplied && !rawInputs._skipCarryover) {
+            const nonCarry = this.calculate({ ...rawInputs, _skipCarryover: true });
+            if (nonCarry.totalTax > result.totalTax) {
+                nonCarry.carryoverDenied = true;
+                nonCarry.carryoverPeriodYears = result.carryoverPeriodYears;
+                if (nonCarry.analysis && Array.isArray(nonCarry.analysis.cautions)) {
+                    nonCarry.analysis.cautions.unshift('증여받은 자산이지만, 이월과세를 적용한 세액이 적용하지 않은 세액보다 적어 법에 따라 이월과세를 적용하지 않고(부인) 더 큰 세액으로 계산했습니다(소득세법 §97의2②). 증여자의 취득가액·취득일은 무시하고, 증여받은 분(수증자) 기준으로 계산했습니다.');
+                }
+                return nonCarry;
+            }
+        }
 
         return result;
     }
@@ -400,6 +426,7 @@ class TaxCalculator {
             oldHomeAdjustedAtNewHomeContract: this.normalizeChoice(rawInputs.oldHomeAdjustedAtNewHomeContract),
             newHomeAdjustedAtContract: this.normalizeChoice(rawInputs.newHomeAdjustedAtContract),
             isAdjustedAreaAtTransfer: this.normalizeChoice(rawInputs.isAdjustedAreaAtTransfer),
+            isNewlyDesignatedArea: rawInputs.isNewlyDesignatedArea || 'no',
             // 겸용주택 관련
             mixedUseHouseArea: Number(rawInputs.mixedUseHouseArea || 0),
             mixedUseCommercialArea: Number(rawInputs.mixedUseCommercialArea || 0),
@@ -422,6 +449,14 @@ class TaxCalculator {
             // 환산취득가액 가산세 관련 (소득세법 §114의2)
             buildingNewBuildWithin5yr: rawInputs.buildingNewBuildWithin5yr || '',
             isNonBusinessLand: rawInputs.isNonBusinessLand || '',
+            // 8년 자경농지 감면 (조특법 §69)
+            selfFarmingExemption: rawInputs.selfFarmingExemption || '',
+            selfFarming8yrMet: rawInputs.selfFarming8yrMet || '',
+            farmlandAtTransfer: rawInputs.farmlandAtTransfer || '',
+            // 주택 부수토지 한도(소득세법 §104의3, 시행령 §157)
+            residentialLandArea: Number(rawInputs.residentialLandArea || 0),
+            buildingFootprintArea: Number(rawInputs.buildingFootprintArea || 0),
+            landZoneType: rawInputs.landZoneType || '',
             // 토지·건물 분리 계산 관련
             landBuildingSeparate: Boolean(rawInputs.landBuildingSeparate),
             priceInputMode: rawInputs.priceInputMode || 'separate',
@@ -460,6 +495,53 @@ class TaxCalculator {
             }
         }
 
+        // ── 배우자·직계존비속 증여 이월과세 (소득세법 §97의2) ──
+        inputs.acquiredByGift = rawInputs.acquiredByGift || 'no';
+        inputs.giftRegistrationDate = rawInputs.giftRegistrationDate || '';
+        inputs.donorAcqDate = rawInputs.donorAcqDate || '';
+        inputs.donorAcqPrice = Number(rawInputs.donorAcqPrice || 0);
+        inputs.giftTaxPaid = Number(rawInputs.giftTaxPaid || 0);
+        inputs._carryoverApplied = false;
+        inputs._carryoverEligibleButManual = false;
+
+        if (
+            inputs.acquiredByGift === 'yes'
+            && inputs.giftRegistrationDate
+            && inputs.donorAcqDate
+            && inputs.donorAcqPrice > 0
+            && inputs.sellDate
+            && inputs.type !== 'stock'
+        ) {
+            const giftDate = this.toDate(inputs.giftRegistrationDate);
+            const sellDate = this.toDate(inputs.sellDate);
+            const donorDate = this.toDate(inputs.donorAcqDate);
+            // 증여등기일 2023.1.1 이후 증여분은 10년, 그 전은 5년 이내 양도 시 이월과세
+            const periodYears = inputs.giftRegistrationDate >= '2023-01-01' ? 10 : 5;
+            const deadline = giftDate ? new Date(giftDate) : null;
+            if (deadline) deadline.setFullYear(deadline.getFullYear() + periodYears);
+
+            const withinPeriod = giftDate && sellDate && donorDate && deadline && sellDate <= deadline;
+            // 토지·건물 분리, 겸용주택, 원조합원 분리 계산과 동시 적용은 위험하므로 자동계산에서 제외(경고만)
+            const autoSafe = (inputs.assetCategory === 'house' || inputs.assetCategory === 'other')
+                && !inputs.landBuildingSeparate
+                && !(rawInputs.specialCases || []).includes('mixed_use_building');
+
+            if (withinPeriod) {
+                inputs._carryoverPeriodYears = periodYears;
+                if (autoSafe && !rawInputs._skipCarryover) {
+                    inputs._carryoverApplied = true;
+                    inputs.acquisitionMethod = 'real';
+                    inputs.acquisitionPrice = inputs.donorAcqPrice;
+                    inputs.necessaryExpenses = (inputs.necessaryExpenses || 0) + inputs.giftTaxPaid;
+                    inputs.buyDate = inputs.donorAcqDate;
+                    const days = (sellDate - donorDate) / (1000 * 60 * 60 * 24);
+                    inputs.holdingPeriod = Number(Math.max(0, days / 365.25).toFixed(2));
+                } else if (!autoSafe) {
+                    inputs._carryoverEligibleButManual = true;
+                }
+            }
+        }
+
         return inputs;
     }
 
@@ -483,6 +565,24 @@ class TaxCalculator {
                 isEligible: false,
                 needsReview: false,
                 message: '주택 외 자산은 1세대 1주택 비과세 판정 대상이 아닙니다.'
+            };
+        }
+
+        // ── 미등기 양도자산: 비과세·감면·장기보유특별공제 전부 배제 (소득세법 §91①, §104①10호) ──
+        if ((inputs.specialCases || []).includes('unregistered')) {
+            return {
+                isEligible: false,
+                needsReview: false,
+                message: '등기를 하지 않고 판 집(미등기 양도)은 1세대 1주택 비과세·감면·장기보유특별공제가 모두 빠지고, 양도차익의 70%가 세금으로 부과됩니다.'
+            };
+        }
+
+        // ── 비거주자: 1세대 1주택 비과세 원칙적 배제 (소득세법 §121②) ──
+        if ((inputs.specialCases || []).includes('nonResident')) {
+            return {
+                isEligible: false,
+                needsReview: true,
+                message: '해외에 사는 비거주자는 원칙적으로 1세대 1주택 비과세를 받을 수 없습니다. 다만 국내에 살던(거주자) 때 산 집을 출국일부터 2년 안에 팔면 비과세가 가능하니, 출국일과 취득일을 꼭 확인하세요.'
             };
         }
 
@@ -868,10 +968,12 @@ class TaxCalculator {
         const gracePeriodEndContract = this.toDate('2026-05-09');
 
         if (contractDate && contractDate <= gracePeriodEndContract) {
+            // 2025.10.16 신규 지정 조정대상지역은 예외 기한이 계약일+6개월(2026.11.9 한정), 기존 지역은 +4개월
+            const graceMonths = inputs.isNewlyDesignatedArea === 'yes' ? 6 : 4;
             const deadline = new Date(contractDate);
-            deadline.setMonth(deadline.getMonth() + 4);
+            deadline.setMonth(deadline.getMonth() + graceMonths);
             if (sellDate <= deadline) {
-                return { isApplicable: false, addRate: 0, gracePeriodApplied: true, hypotheticalAddRate };
+                return { isApplicable: false, addRate: 0, gracePeriodApplied: true, hypotheticalAddRate, graceMonths };
             }
         }
 
@@ -1015,6 +1117,8 @@ class TaxCalculator {
 
     getLongTermDeductionRate(inputs, isNonTaxable1Home) {
         if (inputs.type === 'stock') return 0;
+        // 미등기 양도자산은 장기보유특별공제 배제 (소득세법 §95②)
+        if ((inputs.specialCases || []).includes('unregistered')) return 0;
         if (inputs.type === 'right') {
             if (inputs.rightType === 'ticket') return 0; // 분양권은 장특공제 불가
             // 승계조합원: 입주권 상태 양도는 장특공제 불가 (완공 후는 이미 type='house'로 변환됨)
@@ -1049,6 +1153,11 @@ class TaxCalculator {
     getTaxRate(taxBase, inputs, isHeavyTaxApplicable = false, heavyTaxAddRate = 0) {
         if (inputs.type === 'stock') {
             return this.getStockRateInfo(taxBase, inputs.stockRateCategory);
+        }
+
+        // 미등기 양도자산: 보유기간·자산종류와 무관하게 70% 고정세율 (소득세법 §104①10호)
+        if ((inputs.specialCases || []).includes('unregistered')) {
+            return { rate: 0.70, deduction: 0 };
         }
 
         const years = inputs.holdingPeriod;
@@ -1092,6 +1201,49 @@ class TaxCalculator {
         }
 
         return progressiveRateObj;
+    }
+
+    getResidentialLandLimit(inputs) {
+        // 주택 부수토지 한도 = 건물 정착면적(바닥면적) × 용도지역별 배율 (소득령 §154⑦, §157)
+        const land = inputs.residentialLandArea;
+        const foot = inputs.buildingFootprintArea;
+        const mult = inputs.landZoneType === 'urban_res' ? 3
+            : inputs.landZoneType === 'urban_green' ? 5
+            : inputs.landZoneType === 'non_urban' ? 10
+            : 0;
+        if (!(land > 0 && foot > 0 && mult > 0)) return null;
+        const limit = foot * mult;
+        const excess = Math.max(0, land - limit);
+        return {
+            land,
+            foot,
+            mult,
+            limit,
+            excess,
+            excessRatio: land > 0 ? Number((excess / land).toFixed(4)) : 0,
+            exceeds: excess > 0
+        };
+    }
+
+    getTaxReduction(inputs, calculatedTax) {
+        // 8년 자경농지 감면 (조세특례제한법 §69): 양도소득세 100% 감면, 1과세기간 1억원 한도(농어촌특별세 비과세)
+        const REDUCTION_LIMIT = 100000000;
+        if (
+            inputs.assetCategory === 'other'
+            && inputs.otherAssetCategory === 'land'
+            && inputs.selfFarmingExemption === 'yes'
+            && inputs.selfFarming8yrMet === 'yes'
+            && inputs.farmlandAtTransfer !== 'no'
+        ) {
+            const amount = Math.min(calculatedTax, REDUCTION_LIMIT);
+            return {
+                amount,
+                label: '8년 자경농지 감면(조특법 §69)',
+                capped: calculatedTax > REDUCTION_LIMIT,
+                limit: REDUCTION_LIMIT
+            };
+        }
+        return { amount: 0, label: '', capped: false, limit: REDUCTION_LIMIT };
     }
 
     getStockRateInfo(taxBase, category) {
@@ -1280,9 +1432,76 @@ class TaxCalculator {
 
     buildCautions(inputs, result) {
         const cautions = [];
+        const special = inputs.specialCases || [];
 
         if (result.nonTaxableInfo.needsReview && result.nonTaxableInfo.message) {
             cautions.push(result.nonTaxableInfo.message);
+        }
+
+        // ── 미등기 양도 ──
+        if (special.includes('unregistered')) {
+            cautions.push('등기를 하지 않고 판 집(미등기 양도)으로 계산했습니다. 양도차익의 70%가 세금으로 부과되고, 1세대 1주택 비과세·장기보유특별공제·기본공제(250만원)·감면이 모두 적용되지 않습니다(소득세법 §104①10호 등).');
+        }
+
+        // ── 비거주자 ──
+        if (special.includes('nonResident')) {
+            cautions.push('해외에 사는 비거주자는 1세대 1주택 비과세가 원칙적으로 안 됩니다. 단, 거주자일 때 산 집을 출국일부터 2년 이내에 팔면 비과세가 가능하니 출국일·취득일을 확인하세요. 비거주자는 장기보유특별공제 표2(거주기간 공제)도 적용되지 않습니다.');
+        }
+
+        // ── 배우자·직계존속 증여 이월과세 안내 (자동계산 미반영) ──
+        if (special.includes('inherited')) {
+            cautions.push('증여받은 집(배우자·부모 등 직계존속에게서 받은 경우)을 일정 기간 안에 팔면 "이월과세"가 적용됩니다 — 취득가액과 보유기간을 증여한 사람이 처음 산 시점 기준으로 다시 계산해 세금이 크게 늘 수 있습니다(증여등기일이 2023.1.1 이후면 10년, 그 전이면 5년 이내 양도 시). 이 앱은 이월과세를 자동 계산하지 않으니, 해당하면 전문가 확인이 필요합니다.');
+        }
+
+        // ── 상속주택 상속개시 5년 내 양도 중과배제 안내 ──
+        if (
+            inputs.type === 'house'
+            && (inputs.effectiveHouseCount ?? inputs.houseCount) >= 2
+            && special.includes('inherited')
+            && inputs.inheritanceSaleType === 'inherited'
+        ) {
+            cautions.push('상속받은 주택을 상속개시일(돌아가신 날)부터 5년 이내에 팔면 다주택 중과세가 빠집니다(소득령 §167의3①7호). 상속개시일을 확인하세요 — 5년 이내라면 중과세 없는 세액으로 보아야 합니다.');
+        }
+
+        // ── 이월과세 자동 적용 안내 ──
+        if (inputs._carryoverApplied) {
+            cautions.push(`배우자·직계존비속에게 증여받은 자산을 ${inputs._carryoverPeriodYears || 10}년 이내에 양도해 이월과세를 적용했습니다(소득세법 §97의2). 취득가액과 보유기간을 증여한 사람이 처음 산 가격·시점 기준으로 계산했고, 이미 낸 증여세는 필요경비로 빼드렸습니다. 단, 양도가 수용(사업인정고시일 2년 전 증여분)인 경우엔 이월과세가 적용되지 않으니 확인하세요.`);
+        }
+        if (inputs._carryoverEligibleButManual) {
+            cautions.push('증여받은 자산이 이월과세 대상 기간 안에 있지만, 토지·건물 분리·겸용주택·재개발 분리 계산과 겹쳐 자동 반영하지 못했습니다. 취득가액·보유기간을 증여한 사람 기준으로 다시 계산해야 하니 전문가 확인이 필요합니다.');
+        }
+        if (inputs.acquiredByGift === 'yes' && !inputs._carryoverApplied && !inputs._carryoverEligibleButManual && !result.carryoverDenied && !(inputs.donorAcqPrice > 0)) {
+            cautions.push('증여받은 자산이지만 증여한 사람의 취득가액이 입력되지 않아 이월과세를 반영하지 못했습니다. 정확히 계산하려면 증여자의 당초 취득가액·취득일을 입력하세요.');
+        }
+
+        // ── 신규지정 조정대상지역 6개월 유예 적용 안내 ──
+        if (inputs.isNewlyDesignatedArea === 'yes') {
+            cautions.push('2025년 10월 16일 새로 지정된 조정대상지역으로 보아, 다주택 중과 유예 예외 기한을 계약일부터 6개월(2026년 11월 9일까지)로 적용했습니다. 계약금 수령일과 잔금일을 증빙으로 확인하세요.');
+        }
+
+        // ── 주택 부수토지 한도 초과 ──
+        if (result.landLimitInfo) {
+            const li = result.landLimitInfo;
+            const zoneLabel = inputs.landZoneType === 'urban_res' ? '도시지역 주거·상업·공업(3배)'
+                : inputs.landZoneType === 'urban_green' ? '도시지역 녹지(5배)'
+                : '도시지역 밖(10배)';
+            if (li.exceeds) {
+                cautions.push(`주택 부수토지 한도를 초과했습니다 — 건물 바닥면적 ${li.foot}㎡ × ${li.mult}배 = 한도 ${li.limit}㎡인데, 실제 토지는 ${li.land}㎡로 ${li.excess}㎡(${Math.round(li.excessRatio * 100)}%)가 초과됩니다(${zoneLabel}).`);
+                cautions.push(`초과한 부수토지(${li.excess}㎡)는 주택이 아니라 비사업용 토지로 보아 ① 1세대 1주택 비과세에서 빠지고 ② 그 부분 양도차익에는 기본세율 +10%p가 더 붙습니다. 정확한 세액은 토지·건물 가액을 나눠 비교과세(소득세법 §104⑤)로 계산해야 하므로, 이 앱 계산값은 한도 내 주택 기준 참고치로 보고 전문가 확인을 받으세요.`);
+            } else {
+                cautions.push(`주택 부수토지가 한도 이내입니다 — 건물 바닥면적 ${li.foot}㎡ × ${li.mult}배 = 한도 ${li.limit}㎡, 실제 토지 ${li.land}㎡로 전부 주택 부수토지로 인정됩니다(${zoneLabel}).`);
+            }
+        }
+
+        // ── 8년 자경농지 감면 ──
+        if (result.taxReduction && result.taxReduction.amount > 0) {
+            cautions.push(`${result.taxReduction.label}을 적용해 양도소득세 ${this.formatCurrency(result.taxReduction.amount)}을 감면했습니다. 감면 한도는 1년에 1억원(5년 합계 2억원)이니, 최근 5년 내 다른 감면을 받았다면 합산 한도를 확인하세요.`);
+            if (result.taxReduction.capped) {
+                cautions.push('산출세액이 감면 한도(1억원)를 넘어, 한도까지만 감면하고 나머지는 과세했습니다.');
+            }
+            cautions.push('자경 사실(농지원부·농약·비료 구입내역·직접 경작 증빙)은 세무조사 시 자주 부인되는 부분이니, 양도일 현재까지 직접 농사지었다는 증빙을 꼼꼼히 준비하세요. 8년 자경농지 감면은 농어촌특별세가 면제됩니다.');
+        } else if (inputs.selfFarmingExemption === 'yes' && (inputs.selfFarming8yrMet === 'unknown' || inputs.farmlandAtTransfer === 'unknown')) {
+            cautions.push('자경기간(소득이 연 3,700만원 이상인 해는 제외) 통산 8년 충족 여부나 양도일 현재 농지 여부가 불확실해 자경농지 감면을 자동 반영하지 않았습니다. 요건을 갖추면 양도소득세를 최대 1억원까지 감면받을 수 있으니 확인하세요.');
         }
 
         if (
@@ -1360,6 +1579,18 @@ class TaxCalculator {
 
         if (inputs.specialCases.includes('mixed_use_building') && inputs.transferPrice > 1200000000) {
             cautions.push('12억 초과 고가 상가주택은 주택/상가 면적에 상관없이 상가 부분을 분리하여 별도 과세해야 하므로 정확한 안분 계산이 필수입니다.');
+        }
+
+        // ── 예정신고 기한(양도일이 속한 달의 말일부터 2개월) 경과 시 가산세 경고 ──
+        if (inputs.sellDate && result.totalTax > 0) {
+            const sd = this.toDate(inputs.sellDate);
+            if (sd) {
+                const monthEnd = new Date(sd.getFullYear(), sd.getMonth() + 1, 0); // 양도한 달의 말일
+                const due = new Date(monthEnd.getFullYear(), monthEnd.getMonth() + 2, monthEnd.getDate());
+                if (new Date() > due) {
+                    cautions.push(`예정신고 기한(${due.getFullYear()}년 ${due.getMonth() + 1}월 ${due.getDate()}일)이 이미 지난 것으로 보입니다. 기한을 넘기면 무신고가산세(낼 세금의 20%, 일부러 숨긴 경우 40%)와 납부지연가산세(하루 0.022%)가 더 붙을 수 있으니 서둘러 신고·납부하세요.`);
+                }
+            }
         }
 
         if (result.lbCalc) {

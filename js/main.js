@@ -29,6 +29,14 @@ class App {
             rightType: '',
             membershipType: '',
             isNonBusinessLand: '',
+            // 8년 자경농지 감면 (조특법 §69)
+            selfFarmingExemption: '',
+            selfFarming8yrMet: '',
+            farmlandAtTransfer: '',
+            // 주택 부수토지 한도
+            residentialLandArea: 0,
+            buildingFootprintArea: 0,
+            landZoneType: '',
             type: '',
             houseTaxView: '',
             houseNonTaxableCategory: '',
@@ -44,6 +52,7 @@ class App {
             address: '',
             isAdjustedAreaAtAcquisition: '',
             isAdjustedAreaAtTransfer: '',
+            isNewlyDesignatedArea: 'no',
             newHomeContractDate: '',
             holdingPeriod: 0,
             residencyPeriod: 0,
@@ -103,7 +112,13 @@ class App {
             rentalIsRegistered: '',        // 'yes' | 'no' | 'unknown'
             rentalRegisteredBefore2020: '', // 'yes' | 'no' | 'unknown'
             rentalPeriodType: '',          // 'under5' | '5to10' | 'over10'
-            rentalPriceCapMet: ''          // 'yes' | 'no' | 'unknown'
+            rentalPriceCapMet: '',         // 'yes' | 'no' | 'unknown'
+            // 이월과세 (배우자·직계존비속 증여, 소득세법 §97의2)
+            acquiredByGift: 'no',          // 'yes' | 'no'
+            giftRegistrationDate: '',      // 증여등기일(증여받은 날)
+            donorAcqDate: '',              // 증여자가 처음 취득한 날
+            donorAcqPrice: 0,              // 증여자의 당초 취득가액
+            giftTaxPaid: 0                 // 납부한 증여세
         };
     }
 
@@ -433,9 +448,54 @@ class App {
                         type: 'button',
                         condition: (inputs) => inputs.otherAssetCategory === 'land',
                         options: [
-                            { label: '예', detail: '사업용 토지로 계산 (기본세율)', value: 'no', icon: '사' },
-                            { label: '아니오', detail: '비사업용 토지로 계산 (+10%p 중과)', value: 'yes', icon: '비' },
-                            { label: '잘 모르겠어요', detail: '비사업용 가정 하에 검토 표시', value: 'unknown', icon: '?' }
+                            { label: '예, 사업용으로 썼어요', detail: '농사·임대 등 직접 사업에 사용 → 기본세율', value: 'no', icon: '사' },
+                            { label: '아니오, 사업용이 아니에요', detail: '놀리거나 남에게 빌려준 땅(비사업용) → 기본세율 +10%p 중과', value: 'yes', icon: '비' },
+                            { label: '잘 모르겠어요', detail: '비사업용으로 가정해 계산하고 검토 항목으로 표시', value: 'unknown', icon: '?' }
+                        ]
+                    },
+                    {
+                        id: 'selfFarmingExemption',
+                        title: '이 농지에 대해 "8년 자경농지 감면"을 받으려 하시나요?',
+                        subtitle: '농지가 있는 곳(또는 인접 시·군·구)에 살면서 8년 이상 직접 농사지은 농지를 팔면, 양도소득세를 최대 1억원까지 깎아줍니다(조특법 §69).',
+                        helper: '"자경"은 본인이 직접 농사일의 절반 이상을 하거나 자기 노동력으로 경작한 것을 말합니다. 단순히 소유만 하고 남에게 빌려준 기간은 자경으로 보지 않습니다.',
+                        type: 'button',
+                        condition: (inputs) => inputs.otherAssetCategory === 'land',
+                        onSelect: (inputs, value) => {
+                            inputs.selfFarmingExemption = value;
+                            if (value === 'no') {
+                                inputs.selfFarming8yrMet = '';
+                                inputs.farmlandAtTransfer = '';
+                            }
+                        },
+                        options: [
+                            { label: '예, 자경농지 감면 대상이에요', detail: '8년 이상 직접 농사지은 농지', value: 'yes', icon: '농' },
+                            { label: '아니오 / 해당 없음', detail: '일반 토지로 계산', value: 'no', icon: '아' }
+                        ]
+                    },
+                    {
+                        id: 'selfFarming8yrMet',
+                        title: '직접 농사지은 기간이 통산 8년 이상인가요?',
+                        subtitle: '한 해 동안 농사 외 다른 소득(근로+사업소득)이 3,700만원 이상이었던 해는 자경 기간에서 빼고 계산합니다. 그렇게 빼고도 합쳐서 8년이 넘어야 합니다.',
+                        helper: '연속 8년이 아니어도 됩니다. 보유한 전체 기간 중 직접 농사지은 해를 모두 합해 8년 이상이면 됩니다(소득 3,700만원 이상인 해 제외). 양도 당시 잠시 임대 중이어도 과거에 8년을 채웠으면 감면 가능합니다.',
+                        type: 'button',
+                        condition: (inputs) => inputs.otherAssetCategory === 'land' && inputs.selfFarmingExemption === 'yes',
+                        options: [
+                            { label: '예, 통산 8년 이상이에요', detail: '소득 3,700만원 이상인 해 제외하고도 8년 충족', value: 'yes', icon: '✓' },
+                            { label: '아니오, 8년이 안 돼요', detail: '자경감면 불가 — 대토감면 등 별도 검토', value: 'no', icon: '✗' },
+                            { label: '잘 모르겠어요', detail: '검토 필요 항목으로 표시', value: 'unknown', icon: '?' }
+                        ]
+                    },
+                    {
+                        id: 'farmlandAtTransfer',
+                        title: '양도하는 토지가 양도일 현재까지 농지(전·답·과수원)인가요?',
+                        subtitle: '팔기 전에 농지를 대지 등으로 바꿨다면(전용) 감면이 어려울 수 있습니다.',
+                        helper: '토지대장·등기부등본의 지목이 전·답·과수원인지, 실제로 농작물을 재배하는 땅인지 확인하세요.',
+                        type: 'button',
+                        condition: (inputs) => inputs.otherAssetCategory === 'land' && inputs.selfFarmingExemption === 'yes',
+                        options: [
+                            { label: '예, 양도일까지 농지예요', detail: '자경감면 적용', value: 'yes', icon: '✓' },
+                            { label: '아니오, 농지가 아니에요', detail: '자경감면 불가', value: 'no', icon: '✗' },
+                            { label: '잘 모르겠어요', detail: '지목·실제 이용 확인 필요', value: 'unknown', icon: '?' }
                         ]
                     },
                     {
@@ -618,6 +678,30 @@ class App {
                         ]
                     },
                     {
+                        id: 'acquiredByGift',
+                        title: '이 부동산을 가족에게서 "증여"받으셨나요?',
+                        subtitle: '돌아가신 분에게 물려받은 상속이 아니라, 살아계실 때 배우자나 부모·자녀 등(배우자·직계존비속)에게서 증여받은 경우를 말합니다.',
+                        helper: '증여받은 부동산을 일정 기간 안에 팔면 "이월과세"가 적용됩니다 — 세금을 증여한 사람이 처음 산 가격·시점 기준으로 다시 계산해 세금이 크게 늘 수 있어요(증여받은 날이 2023년 1월 1일 이후면 10년, 그 전이면 5년 이내 양도 시). 다음 화면에서 증여자가 처음 산 날·가격을 입력하면 자동으로 반영해 드립니다.',
+                        type: 'button',
+                        condition: (inputs) => {
+                            if (inputs.assetCategory === 'house') return (inputs.specialCases || []).includes('inherited');
+                            return inputs.assetCategory === 'other';
+                        },
+                        onSelect: (inputs, value) => {
+                            inputs.acquiredByGift = value;
+                            if (value === 'no') {
+                                inputs.giftRegistrationDate = '';
+                                inputs.donorAcqDate = '';
+                                inputs.donorAcqPrice = 0;
+                                inputs.giftTaxPaid = 0;
+                            }
+                        },
+                        options: [
+                            { label: '예, 가족에게 증여받았어요', detail: '이월과세 검토 — 증여자 취득가액·취득일 기준 재계산', value: 'yes', icon: '증' },
+                            { label: '아니오 (직접 샀거나 상속받음)', detail: '일반 계산', value: 'no', icon: '아' }
+                        ]
+                    },
+                    {
                         id: 'newAssetType',
                         title: '새로 취득하신 자산은 무엇인가요?',
                         subtitle: '어떤 자산을 샀는지에 따라 일시적 2주택 요건이 달라집니다.',
@@ -710,7 +794,7 @@ class App {
                         condition: (inputs) => inputs.assetCategory === 'house',
                         emptySelectionHint: '해당되는 것이 없으면 선택하지 말고 다음으로 넘어가세요.',
                         onSelect: (inputs, values) => {
-                            const PROPERTY_ITEMS = ['multi_family_whole', 'mixed_use_building', 'reconstruction', 'cash_settlement', 'unsold_new'];
+                            const PROPERTY_ITEMS = ['multi_family_whole', 'mixed_use_building', 'reconstruction', 'cash_settlement', 'unsold_new', 'large_land_house'];
                             const existing = (inputs.specialCases || []).filter(v => !PROPERTY_ITEMS.includes(v));
                             inputs.specialCases = [...existing, ...values];
                             inputs.propertySpecialCases = values;
@@ -719,7 +803,8 @@ class App {
                             { label: '재개발·재건축 현금청산을 받은 경우', value: 'cash_settlement' },
                             { label: '준공 후 미분양·소형 신축 특례 검토', value: 'unsold_new' },
                             { label: '다가구주택을 건물 전체로 파는 경우', value: 'multi_family_whole' },
-                            { label: '주택과 상가가 함께 있는 상가주택 건물', value: 'mixed_use_building' }
+                            { label: '주택과 상가가 함께 있는 상가주택 건물', value: 'mixed_use_building' },
+                            { label: '마당·텃밭 등 넓은 땅이 딸린 단독주택', value: 'large_land_house' }
                         ]
                     },
                     // ── 임대사업자 특례: 양도 집 종류 ──
@@ -853,7 +938,7 @@ class App {
                     {
                         id: 'inheritanceRuralHouseType',
                         title: '상속받은 집이 농어촌주택인가요?',
-                        subtitle: '수도권 밖 읍·면 지역에 있고, 피상속인이 취득 후 5년 이상 거주한 경우 더 넓은 비과세 특례가 적용됩니다.',
+                        subtitle: '수도권 밖 읍·면 지역에 있고, 돌아가신 분(피상속인)이 그 집을 산 뒤 5년 이상 살았던 경우라면 더 넓은 비과세 혜택이 적용됩니다.',
                         helper: '소득세법 시행령 §155⑦①: 피상속인이 5년 이상 거주한 농어촌주택을 상속받은 경우, 상속개시일 이후 새로 취득한 일반주택을 양도할 때도 1주택으로 보아 비과세 가능합니다. 일반 상속특례(§155②)는 상속개시 당시 보유한 주택만 해당하므로, 이 특례가 더 유리합니다.',
                         type: 'button',
                         condition: (inputs) => inputs.houseNonTaxableCategory === 'specialNonTaxable'
@@ -867,8 +952,8 @@ class App {
                     // ── 상속 특례: 공동상속 지분 ──
                     {
                         id: 'inheritanceShareType',
-                        title: '상속받은 주택에서 선생님의 지분은 어떻게 되나요?',
-                        subtitle: '공동상속주택은 지분 크기에 따라 주택 수 산정 방식이 달라집니다.',
+                        title: '상속받은 주택에서 선생님의 몫(지분)은 어떻게 되나요?',
+                        subtitle: '지분은 여러 명이 한 집을 함께 물려받았을 때 각자의 몫이에요. 내 몫이 가장 작으면(소수지분) 그 집이 내 주택 수에서 빠질 수 있습니다.',
                         helper: '소수지분자(공동상속인 중 가장 작은 지분)는 해당 주택이 주택 수에서 제외될 수 있습니다. 지분이 동률이면 연장자가 소유자로 취급됩니다.',
                         type: 'button',
                         condition: (inputs) => inputs.houseNonTaxableCategory === 'specialNonTaxable'
@@ -938,12 +1023,44 @@ class App {
                             { label: '잘 모르겠어요', detail: '건축물대장 확인 필요', value: 'unknown', icon: '?' }
                         ]
                     },
+                    // ── 주택 부수토지 한도 (넓은 땅 딸린 단독주택) ──
+                    {
+                        id: 'landZoneType',
+                        title: '이 주택의 땅은 어떤 지역에 있나요?',
+                        subtitle: '땅이 있는 용도지역에 따라 "주택 부수토지로 인정되는 한도"가 달라집니다. 한도를 넘는 땅은 비사업용 토지로 보아 비과세에서 빠지고 세율이 올라갑니다.',
+                        helper: '용도지역은 토지이용계획확인원(정부24·토지e음)에서 확인할 수 있습니다. 대부분의 도시 단독주택은 "주거지역"입니다.',
+                        type: 'button',
+                        condition: (inputs) => (inputs.specialCases || []).includes('large_land_house'),
+                        options: [
+                            { label: '도시지역 주거·상업·공업지역', detail: '건물 바닥면적의 3배까지 주택 땅으로 인정', value: 'urban_res', icon: '도' },
+                            { label: '도시지역 녹지지역', detail: '건물 바닥면적의 5배까지 인정', value: 'urban_green', icon: '녹' },
+                            { label: '도시지역 밖(농어촌 등)', detail: '건물 바닥면적의 10배까지 인정', value: 'non_urban', icon: '외' }
+                        ]
+                    },
+                    {
+                        id: 'buildingFootprintArea',
+                        title: '건물이 땅에 닿는 바닥면적(정착면적)은 몇 ㎡인가요?',
+                        subtitle: '여러 층이어도 1층이 땅을 차지하는 면적만 적으면 됩니다. 건축물대장의 "건축면적"을 보면 됩니다.',
+                        helper: '예: 2층 단독주택이라도 1층 바닥이 60㎡면 60을 입력하세요. 숫자만 ㎡ 단위로 입력합니다.',
+                        type: 'text',
+                        condition: (inputs) => (inputs.specialCases || []).includes('large_land_house'),
+                        placeholder: '예: 60'
+                    },
+                    {
+                        id: 'residentialLandArea',
+                        title: '주택에 딸린 땅 전체 면적은 몇 ㎡인가요?',
+                        subtitle: '등기부등본·토지대장에 나오는 대지면적입니다. 마당·텃밭을 포함한 전체 땅 면적을 적어주세요.',
+                        helper: '숫자만 ㎡ 단위로 입력합니다. (1평 ≈ 3.3㎡)',
+                        type: 'text',
+                        condition: (inputs) => (inputs.specialCases || []).includes('large_land_house'),
+                        placeholder: '예: 330'
+                    },
                     // ── 재개발·재건축 관련 날짜 ──
                     {
                         id: 'approvalDate',
                         title: '관리처분계획 인가일은 언제인가요?',
-                        subtitle: '기존 부동산부 차익과 권리부 차익을 나누는 기준일입니다. 인가일 이전 차익에만 장기보유특별공제가 적용됩니다.',
-                        helper: '정확한 날짜는 조합에서 발급하는 관리처분계획인가서에서 확인할 수 있습니다. 입력하지 않으면 단순 추정치로 계산됩니다.',
+                        subtitle: '관리처분계획 인가일이란, 재개발·재건축 사업이 구청 등으로부터 공식 승인을 받은 날이에요. 이날을 기준으로 "원래 집·땅에서 생긴 이익"과 "입주권 권리에서 생긴 이익"을 나누는데, 앞쪽(인가일 전) 이익에만 장기보유특별공제(오래 보유하면 깎아주는 공제)가 적용됩니다.',
+                        helper: '정확한 날짜는 조합에서 주는 "관리처분계획인가서"에 적혀 있어요. 모르면 비워둬도 되지만, 그럴 땐 대략 추정해서 계산합니다.',
                         type: 'date_single',
                         condition: (inputs) => inputs.assetCategory === 'right' && inputs.rightType === 'membership' && inputs.membershipType === 'original'
                     },
@@ -1008,6 +1125,34 @@ class App {
                                 { id: 'sellDate', label: '양도일(잔금일)' }
                             ];
                         }
+                    },
+                    {
+                        id: 'giftRegistrationDate',
+                        title: '증여받은 날(증여등기일)은 언제인가요?',
+                        subtitle: '이 부동산을 가족에게서 증여받아 소유권 이전 등기를 한 날입니다. 이 날부터 10년(2022년 12월 31일 이전 증여는 5년) 안에 팔면 이월과세가 적용됩니다.',
+                        helper: '등기부등본의 "소유권이전(증여)" 접수일에서 확인할 수 있습니다.',
+                        type: 'date_single',
+                        condition: (inputs) => inputs.acquiredByGift === 'yes'
+                    },
+                    {
+                        id: 'donorAcqDate',
+                        title: '증여해 준 가족이 이 부동산을 "처음 산 날"은 언제인가요?',
+                        subtitle: '이월과세에서는 보유기간을 증여받은 날이 아니라, 증여한 사람이 처음 취득한 날부터 계산합니다. 보유기간이 길어져 장기보유특별공제가 늘 수 있어요.',
+                        helper: '증여 당시 받은 자료나 등기부등본의 종전 취득일에서 확인할 수 있습니다.',
+                        type: 'date_single',
+                        condition: (inputs) => inputs.acquiredByGift === 'yes'
+                    },
+                    {
+                        id: 'giftCarryoverPrices',
+                        title: '증여 관련 금액을 입력해주세요.',
+                        subtitle: '이월과세에서는 취득가액을 증여받을 때의 평가액이 아니라, 증여한 사람이 처음 산 가격으로 봅니다. 이미 낸 증여세는 비용으로 빼드립니다. 단위는 만원입니다.',
+                        helper: '증여자의 취득가액은 증여한 사람이 그 부동산을 처음 살 때의 실제 매입가액(취득세 등 포함)입니다. 낸 증여세는 증여받을 때 납부한 증여세 결정세액입니다.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.acquiredByGift === 'yes',
+                        fields: [
+                            { id: 'donorAcqPrice', label: '증여한 사람의 당초 취득가액(취득세 등 포함)' },
+                            { id: 'giftTaxPaid', label: '증여받을 때 낸 증여세 (없으면 0)' }
+                        ]
                     },
                     {
                         id: 'newHomeContractDate',
@@ -1095,6 +1240,22 @@ class App {
                         ]
                     },
                     {
+                        id: 'isNewlyDesignatedArea',
+                        title: '이 주택이 2025년 10월 16일에 "새로" 조정대상지역으로 지정된 곳인가요?',
+                        subtitle: '2025년 10월 16일 새로 지정된 지역(서울 전 자치구, 경기 과천·광명·성남·수원·안양·용인·의왕·하남 등)은 중과 유예 예외 기한이 계약일부터 4개월이 아니라 6개월(2026년 11월 9일까지)로 더 깁니다.',
+                        helper: '계약금까지 받은 매매계약을 2026년 5월 9일 안에 맺었다면, 신규 지정 지역은 그 계약일부터 6개월 안에 잔금을 치르면 다주택 중과를 피할 수 있습니다. 원래부터 조정대상지역이던 곳은 4개월입니다. 잘 모르겠으면 "아니오"를 고르세요(4개월 기준으로 안전하게 계산).',
+                        type: 'button',
+                        condition: (inputs) => inputs.assetCategory === 'house'
+                            && (inputs.effectiveHouseCount ?? inputs.houseCount) >= 2
+                            && inputs.isAdjustedAreaAtTransfer === 'yes'
+                            && inputs.contractDate
+                            && inputs.contractDate <= '2026-05-09',
+                        options: [
+                            { label: '예, 2025년 10월 16일 신규 지정 지역이에요', detail: '유예 예외 기한 6개월 적용', value: 'yes', icon: '신' },
+                            { label: '아니오 / 잘 모르겠어요', detail: '기존 조정대상지역 기준 4개월 적용', value: 'no', icon: '기' }
+                        ]
+                    },
+                    {
                         id: 'landBuildingSeparate',
                         title: '이 부동산을 토지와 건물로 나누어 계산할까요?',
                         subtitle: '토지와 건물은 취득시기·취득가액 산정방법이 다른 경우가 많아, 나누어 계산하면 더 정확합니다.',
@@ -1119,8 +1280,8 @@ class App {
                         type: 'button',
                         condition: (inputs) => inputs.assetCategory !== 'stock' && !inputs.landBuildingSeparate,
                         options: [
-                            { label: '예, 계약서가 있어요', detail: '실지거래가액 계산 (실제 산 금액 적용)', value: 'real', icon: '실' },
-                            { label: '아니오, 계약서를 분실했어요', detail: '환산취득가액 계산 (나라가 정한 기준시가 기준)', value: 'estimated', icon: '환' }
+                            { label: '예, 계약서가 있어요', detail: '실제 산 금액(실지거래가액)으로 계산', value: 'real', icon: '실' },
+                            { label: '아니오, 계약서를 분실했어요', detail: '나라 기준가격으로 역산한 추정 취득가(환산취득가액)로 계산', value: 'estimated', icon: '환' }
                         ]
                     },
                     {
@@ -1219,8 +1380,8 @@ class App {
                     {
                         id: 'redev_prices',
                         title: '재개발 관련 추가 금액을 입력해주세요.',
-                        subtitle: '납부 청산금과 기존건물 평가액(원조합원)을 별도로 입력하면 더 정확한 계산이 됩니다.',
-                        helper: '납부 청산금: 새 아파트 분양가가 기존건물 평가액보다 클 때 조합에 추가 납부한 금액. 기존건물 평가액(권리가액): 관리처분계획에서 기존 주택에 산정한 평가액 (원조합원만 해당).',
+                        subtitle: '"낸 청산금"과 "기존건물 평가액"을 따로 입력하면 더 정확하게 계산돼요.',
+                        helper: '낸 청산금(납부 청산금): 새 아파트 값이 내 기존 집 값보다 커서, 그 차액을 조합에 추가로 낸 돈이에요. 기존건물 평가액(권리가액): 재개발 사업에서 내 원래 집·땅을 얼마로 쳐줬는지 평가한 금액으로, 관리처분계획서에 적혀 있어요(원래부터 조합원이던 원조합원만 해당).',
                         type: 'currency_group',
                         condition: (inputs) => inputs.assetCategory === 'right' && inputs.rightType === 'membership' && inputs.acquisitionMethod === 'real',
                         fields: (inputs) => {
