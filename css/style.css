@@ -89,9 +89,15 @@ body {
 .app-shell {
     position: relative;
     z-index: 1;
-    width: min(100%, 720px);
+    width: min(100%, 1180px);
     margin: 0 auto;
-    padding: 28px 16px 56px;
+    padding: 28px clamp(16px, 3vw, 40px) 56px;
+}
+
+/* 질문 화면은 너무 넓으면 읽기 불편해 중앙 고정 폭 유지 */
+.wizard-panel {
+    max-width: 880px;
+    margin: 0 auto;
 }
 
 .screen {
@@ -1319,7 +1325,7 @@ body {
 
 .intro-hero-visual {
     position: relative;
-    width: clamp(168px, 44vw, 232px);
+    width: clamp(168px, 30vw, 280px);
     margin: var(--space-xs) 0;
 }
 
@@ -1471,6 +1477,48 @@ body {
 .intro-anim {
     opacity: 0;
     animation: introUp 0.72s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+}
+
+/* ── 데스크톱 와이드 레이아웃: 결과 화면을 2열로 채움 ── */
+@media (min-width: 1080px) {
+    .result-summary {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+        gap: var(--space-lg);
+        align-items: center;
+    }
+
+    .result-summary .tax-amount-box {
+        grid-column: 1;
+        grid-row: 1;
+        margin-bottom: 0;
+    }
+
+    .result-summary .summary-grid {
+        grid-column: 2;
+        grid-row: 1;
+    }
+
+    .result-summary #savings-banner-container {
+        grid-column: 1 / -1;
+    }
+
+    .result-summary #savings-banner-container:empty {
+        display: none;
+    }
+
+    .info-columns {
+        column-count: 2;
+        column-gap: var(--space-xl);
+        margin-top: var(--space-lg);
+    }
+
+    .info-columns > .info-section {
+        -webkit-column-break-inside: avoid;
+        break-inside: avoid;
+        margin-top: 0;
+        margin-bottom: var(--space-lg);
+    }
 }
 
 .intro-anim.d1 { animation-delay: 0.05s; }
