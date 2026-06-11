@@ -282,7 +282,11 @@ class TaxCalculator {
                 && inputs.buildingNewBuildWithin5yr === 'yes'
                 && acquisitionCost > 0)
                 ? Math.floor(acquisitionCost * 0.05) : 0);
-        const totalTax = decisionTax + localTax + conversionSurcharge;
+        // 예정신고 기한 경과 시 무신고·납부지연 가산세 추정 (오늘 기한 후 신고·납부 가정)
+        const filingPenalty = this.getFilingPenalty(inputs, decisionTax);
+        // 신고서(국세분)에 적는 납부할 세액 — 지방소득세는 별도 신고이므로 제외
+        const nationalTax = decisionTax + conversionSurcharge + filingPenalty.total;
+        const totalTax = nationalTax + localTax;
 
         let normalTotalTax = 0;
         if (heavyTaxInfo.isApplicable) {
@@ -318,7 +322,8 @@ class TaxCalculator {
             const hypoCalculatedTax = hypoTaxPerPerson * persons;
             const hypoLocalTax = Math.floor(hypoCalculatedTax * 0.1);
             hypotheticalHeavyTax = hypoCalculatedTax + hypoLocalTax;
-            savingsFromGracePeriod = Math.max(0, hypotheticalHeavyTax - totalTax);
+            // 가산세는 양쪽 시나리오에 공통이므로 비교에서 제외 (감면·기본세액 + 지방세 기준)
+            savingsFromGracePeriod = Math.max(0, hypotheticalHeavyTax - (decisionTax + localTax));
         }
 
         const result = {
@@ -342,6 +347,8 @@ class TaxCalculator {
             decisionTax,
             localTax,
             conversionSurcharge,
+            filingPenalty,
+            nationalTax,
             totalTax,
             persons,
             isHeavyTaxApplicable: heavyTaxInfo.isApplicable,
@@ -1246,6 +1253,36 @@ class TaxCalculator {
         return { amount: 0, label: '', capped: false, limit: REDUCTION_LIMIT };
     }
 
+    // 예정신고 기한 = 양도일이 속한 달(주식은 반기)의 말일부터 2개월
+    getFilingDueDate(inputs) {
+        const sd = this.toDate(inputs.sellDate);
+        if (!sd) return null;
+        const periodEndMonth = inputs.type === 'stock'
+            ? (sd.getMonth() < 6 ? 5 : 11)
+            : sd.getMonth();
+        // 말일부터 2개월: 해당 월 + 2개월의 말일 (예: 5월 양도 → 7/31, 상반기 주식 → 8/31)
+        return new Date(sd.getFullYear(), periodEndMonth + 3, 0);
+    }
+
+    // 무신고·납부지연 가산세 추정 (국기법 §47의2·§47의4, §48②1 기한 후 신고 감면) — 오늘 신고·납부 가정
+    getFilingPenalty(inputs, decisionTax) {
+        const none = { total: 0, noFiling: 0, latePayment: 0, daysLate: 0, reductionRate: 0, dueDate: null };
+        if (decisionTax <= 0 || !inputs.sellDate) return none;
+        const due = this.getFilingDueDate(inputs);
+        if (!due) return none;
+        const today = new Date();
+        if (today <= due) return { ...none, dueDate: due };
+        const daysLate = Math.floor((today - due) / 86400000);
+        const addMonths = (d, m) => new Date(d.getFullYear(), d.getMonth() + m, d.getDate());
+        let reductionRate = 0;
+        if (today <= addMonths(due, 1)) reductionRate = 0.5;
+        else if (today <= addMonths(due, 3)) reductionRate = 0.3;
+        else if (today <= addMonths(due, 6)) reductionRate = 0.2;
+        const noFiling = Math.floor(decisionTax * 0.2 * (1 - reductionRate));
+        const latePayment = Math.floor(decisionTax * daysLate * 0.00022);
+        return { total: noFiling + latePayment, noFiling, latePayment, daysLate, reductionRate, dueDate: due };
+    }
+
     getStockRateInfo(taxBase, category) {
         switch (category) {
             case 'smallBusiness10':
@@ -1581,16 +1618,11 @@ class TaxCalculator {
             cautions.push('12억 초과 고가 상가주택은 주택/상가 면적에 상관없이 상가 부분을 분리하여 별도 과세해야 하므로 정확한 안분 계산이 필수입니다.');
         }
 
-        // ── 예정신고 기한(양도일이 속한 달의 말일부터 2개월) 경과 시 가산세 경고 ──
-        if (inputs.sellDate && result.totalTax > 0) {
-            const sd = this.toDate(inputs.sellDate);
-            if (sd) {
-                const monthEnd = new Date(sd.getFullYear(), sd.getMonth() + 1, 0); // 양도한 달의 말일
-                const due = new Date(monthEnd.getFullYear(), monthEnd.getMonth() + 2, monthEnd.getDate());
-                if (new Date() > due) {
-                    cautions.push(`예정신고 기한(${due.getFullYear()}년 ${due.getMonth() + 1}월 ${due.getDate()}일)이 이미 지난 것으로 보입니다. 기한을 넘기면 무신고가산세(낼 세금의 20%, 일부러 숨긴 경우 40%)와 납부지연가산세(하루 0.022%)가 더 붙을 수 있으니 서둘러 신고·납부하세요.`);
-                }
-            }
+        // ── 예정신고 기한 경과 시 무신고·납부지연 가산세 안내 (세액에 자동 반영) ──
+        if (result.filingPenalty && result.filingPenalty.total > 0) {
+            const fp = result.filingPenalty;
+            const due = fp.dueDate;
+            cautions.push(`예정신고 기한(${due.getFullYear()}년 ${due.getMonth() + 1}월 ${due.getDate()}일)이 ${fp.daysLate}일 지났습니다. 오늘 기한 후 신고·납부한다고 가정해 무신고가산세 ${this.formatCurrency(fp.noFiling)}${fp.reductionRate > 0 ? `(기한 후 신고 ${Math.round(fp.reductionRate * 100)}% 감면 반영)` : ''}와 납부지연가산세 ${this.formatCurrency(fp.latePayment)}(하루 0.022%)를 세액에 포함했습니다. 일부러 숨긴 부정무신고면 40%로 늘어나고, 이미 신고·납부를 마쳤다면 이 가산세는 무시하세요.`);
         }
 
         if (result.lbCalc) {
@@ -1873,13 +1905,7 @@ class TaxCalculator {
                 result: fmt(result.calculatedTax),
                 note: ''
             });
-            steps.push({
-                step: incomeStep + 3,
-                label: '총 납부세액 (지방소득세 10% 포함)',
-                formula: `${fmt(result.calculatedTax)} + ${fmt(result.localTax)}`,
-                result: fmt(result.totalTax),
-                note: '양도일이 속하는 달의 말일부터 2개월 이내 예정신고'
-            });
+            this.appendFinalTaxSteps(steps, result, incomeStep + 3);
             return steps;
         }
 
@@ -1977,10 +2003,31 @@ class TaxCalculator {
                     : '')
         });
 
-        // 환산취득가액 가산세 (소득세법 §114의2)
+        this.appendFinalTaxSteps(steps, result, stepNum + 2);
+
+        return steps;
+    }
+
+    // 산출세액 이후 공통 마무리 스텝: 감면 → 가산세 → 국세 납부세액 → 지방소득세 → 총액
+    appendFinalTaxSteps(steps, result, startNum) {
+        const fmt = (v) => this.formatCurrency(v);
+        let n = startNum;
+
+        if (result.taxReduction && result.taxReduction.amount > 0) {
+            steps.push({
+                step: n++,
+                label: `세액감면 — ${result.taxReduction.label}`,
+                formula: `${fmt(result.calculatedTax)} - 감면 ${fmt(result.taxReduction.amount)}`,
+                result: fmt(result.decisionTax),
+                note: result.taxReduction.capped
+                    ? '감면 한도(1과세기간 1억원)가 적용되어 일부만 감면됩니다'
+                    : '산출세액에서 감면세액을 뺀 금액이 신고서의 기준 세액이 됩니다'
+            });
+        }
+
         if (result.conversionSurcharge > 0) {
             steps.push({
-                step: stepNum + 2,
+                step: n++,
                 label: '환산취득가액 가산세 (소득세법 §114의2)',
                 formula: `환산취득가액 ${fmt(result.acquisitionCost)} × 5%`,
                 result: `+${fmt(result.conversionSurcharge)}`,
@@ -1988,18 +2035,46 @@ class TaxCalculator {
             });
         }
 
-        // Step 7: 지방소득세 포함 최종 세액
+        if (result.filingPenalty && result.filingPenalty.total > 0) {
+            const fp = result.filingPenalty;
+            steps.push({
+                step: n++,
+                label: '무신고·납부지연 가산세 (예정신고 기한 경과)',
+                formula: `무신고 ${fmt(fp.noFiling)} + 납부지연 ${fmt(fp.latePayment)}`,
+                result: `+${fmt(fp.total)}`,
+                note: `오늘 기한 후 신고한다고 가정한 추정액입니다(기한 ${fp.daysLate}일 경과${fp.reductionRate > 0 ? `, 무신고가산세 ${Math.round(fp.reductionRate * 100)}% 감면 반영` : ''}). 이미 신고·납부했다면 제외하세요.`
+            });
+        }
+
+        const adjustParts = [fmt(result.calculatedTax)];
+        if (result.taxReduction && result.taxReduction.amount > 0) adjustParts.push(`- 감면 ${fmt(result.taxReduction.amount)}`);
+        if (result.conversionSurcharge > 0) adjustParts.push(`+ 가산세 ${fmt(result.conversionSurcharge)}`);
+        if (result.filingPenalty && result.filingPenalty.total > 0) adjustParts.push(`+ 가산세 ${fmt(result.filingPenalty.total)}`);
         steps.push({
-            step: result.conversionSurcharge > 0 ? stepNum + 3 : stepNum + 2,
-            label: '총 납부세액 (지방소득세 10% 포함)',
-            formula: result.conversionSurcharge > 0
-                ? `${fmt(result.calculatedTax)} + ${fmt(result.localTax)} + 가산세 ${fmt(result.conversionSurcharge)}`
-                : `${fmt(result.calculatedTax)} + ${fmt(result.localTax)}`,
+            step: n++,
+            label: '양도소득세 납부세액 (국세)',
+            formula: adjustParts.length > 1 ? adjustParts.join(' ') : '산출세액과 동일',
+            result: fmt(result.nationalTax),
+            note: '신고서의 "납부할 세액" 칸에는 지방소득세를 뺀 이 금액을 적습니다'
+        });
+
+        steps.push({
+            step: n++,
+            label: '지방소득세 (양도소득분)',
+            formula: `${fmt(result.decisionTax)} × 10%`,
+            result: `+${fmt(result.localTax)}`,
+            note: '양도소득세와 별도로 신고하는 지방세입니다. 홈택스 예정신고 시 함께 신고할 수 있습니다.'
+        });
+
+        steps.push({
+            step: n,
+            label: '총 납부세액 (지방소득세 포함)',
+            formula: `${fmt(result.nationalTax)} + ${fmt(result.localTax)}`,
             result: fmt(result.totalTax),
             note: '양도일이 속하는 달의 말일부터 2개월 이내에 예정신고 필요'
         });
 
-        return steps;
+        return n;
     }
 
     buildScenarios(inputs, result) {
@@ -2148,6 +2223,11 @@ class TaxCalculator {
             return this.buildSimpleStockGuide(inputs, result);
         }
 
+        // 세액감면 적용 시: 간편신고서(84의4, 2025.3.21 개정)에는 감면세액 칸이 없으므로 본표로 안내
+        if (result.taxReduction && result.taxReduction.amount > 0) {
+            return this.buildStandardGuide(inputs, result);
+        }
+
         if (inputs.type !== 'stock' && inputs.otherAssetCategory !== 'complex') {
             return this.buildSimpleRealEstateGuide(inputs, result);
         }
@@ -2162,7 +2242,8 @@ class TaxCalculator {
             reason: '단일 부동산·권리자산 1건 흐름으로 입력되어 별지 제84호의4 간편신고서에 바로 옮겨 적기 좋습니다.',
             notes: [
                 '양수인 인적사항, 지분, 자산종류 코드, 세율구분 코드는 직접 확인해 적으세요.',
-                '공동명의라면 실제 지분별로 각자 신고서를 나누어 작성해야 할 수 있습니다.'
+                '공동명의라면 실제 지분별로 각자 신고서를 나누어 작성해야 할 수 있습니다.',
+                '실제 신고는 홈택스(손택스) 전자신고가 가장 간편하고 전자신고세액공제 2만원도 받을 수 있습니다. 이 HWPX 파일은 서면 제출·사전 검토용 초안으로 활용하세요.'
             ],
             lines: [
                 { label: '③ 자산종류', value: this.getCaseLabel(inputs, result) },
@@ -2182,18 +2263,20 @@ class TaxCalculator {
                 { label: '⑰ 과세표준', value: this.formatCurrency(result.taxBaseTotal) },
                 { label: '⑱ 세율', value: this.getDisplayTaxRate(inputs, result) },
                 { label: '⑲ 산출세액', value: this.formatCurrency(result.calculatedTax) },
-                { label: '⑳ 감면세액', value: '해당 시 직접 입력' },
-                { label: '㉑ 전자신고세액공제', value: '전자신고 시 최대 20,000원 검토' },
-                { label: '㉒ 가산세', value: '해당 시 직접 계산' },
-                { label: '㉓ 납부할 세액', value: this.formatCurrency(result.totalTax) },
-                { label: '㉔ 분납할 세액', value: this.getInstallmentTaxLabel(result.totalTax) }
+                { label: '⑳ 연금계좌세액공제', value: '양도대금을 연금계좌에 납입한 경우 직접 입력' },
+                { label: '㉑ 전자신고세액공제', value: '홈택스 전자신고 시 20,000원 검토' },
+                { label: '㉒ 가산세', value: this.getSurchargeLabel(result) },
+                { label: '㉓ 납부할 세액', value: this.formatCurrency(result.nationalTax) },
+                { label: '㉔ 분납할 세액', value: this.getInstallmentTaxLabel(result.nationalTax) },
+                { label: '㉕ 납부세액', value: '분납하지 않으면 ㉓과 동일' },
+                { label: '지방소득세 (별도 신고)', value: this.formatCurrency(result.localTax) }
             ],
             manualFields: [
                 '① 양도인, ② 양수인 인적사항',
                 '③ 자산종류 코드, ④ 세율구분 코드',
                 '부동산고유번호, 양도·취득 원인, 면적',
                 '오른쪽 취득가액·필요경비 상세 적요와 증빙종류 코드',
-                '전자신고세액공제, 가산세, 감면세액 해당 여부'
+                '연금계좌세액공제, 전자신고세액공제 해당 여부'
             ]
         };
     }
@@ -2205,7 +2288,9 @@ class TaxCalculator {
             reason: '주식 1~2종목 단순 사례로 입력되어 별지 제84호의5 주식등 양도소득세 간편신고서 흐름을 우선 추천합니다.',
             notes: [
                 '국세청 안내상 신고대상 국내주식은 상장주식 대주주, 상장주식 장외거래, 비상장주식, 국외주식 등이 대표적입니다.',
-                '국내 상장주식 장내거래 소액주주는 일반적으로 양도소득세 신고대상이 아니므로 대상 여부를 먼저 확인하세요.'
+                '국내 상장주식 장내거래 소액주주는 일반적으로 양도소득세 신고대상이 아니므로 대상 여부를 먼저 확인하세요.',
+                '주식 예정신고 기한은 양도일이 속하는 반기의 말일부터 2개월입니다(상반기 양도 → 8월 말, 하반기 양도 → 다음 해 2월 말).',
+                '실제 신고는 홈택스(손택스) 전자신고가 가장 간편합니다. 이 HWPX 파일은 서면 제출·사전 검토용 초안으로 활용하세요.'
             ],
             lines: [
                 { label: '3. 양도한 주식등 상세내역', value: `${Math.max(1, inputs.stockItemCount)}종목 기준으로 작성` },
@@ -2220,10 +2305,11 @@ class TaxCalculator {
                 { label: '⑳ 과세표준', value: this.formatCurrency(result.taxBaseTotal) },
                 { label: '세율', value: this.getDisplayTaxRate(inputs, result) },
                 { label: '산출세액', value: this.formatCurrency(result.calculatedTax) },
-                { label: '전자신고세액공제', value: '전자신고 시 최대 20,000원 검토' },
-                { label: '가산세', value: '해당 시 직접 계산' },
-                { label: '납부할 세액', value: this.formatCurrency(result.totalTax) },
-                { label: '분납할 세액', value: this.getInstallmentTaxLabel(result.totalTax) }
+                { label: '전자신고세액공제', value: '홈택스 전자신고 시 20,000원 검토' },
+                { label: '가산세', value: this.getSurchargeLabel(result) },
+                { label: '납부할 세액', value: this.formatCurrency(result.nationalTax) },
+                { label: '분납할 세액', value: this.getInstallmentTaxLabel(result.nationalTax) },
+                { label: '지방소득세 (별도 신고)', value: this.formatCurrency(result.localTax) }
             ],
             manualFields: [
                 '1. 양도인(신고인), 2. 양수인 인적사항',
@@ -2237,13 +2323,21 @@ class TaxCalculator {
 
     buildStandardGuide(inputs, result) {
         const formInfo = FilingFormFiles.standard;
+        const hasReduction = result.taxReduction && result.taxReduction.amount > 0;
+        const notes = [
+            '별지84는 요약 본표 성격이어서 자산별 양도소득금액 계산명세를 함께 준비해야 할 수 있습니다.',
+            '복수 자산은 자산별 세율, 기본공제 적용 순서, 손익통산 여부를 별도로 맞춘 뒤 본표 합계로 옮기는 것이 안전합니다.',
+            '실제 신고는 홈택스(손택스) 전자신고가 가장 간편하고 전자신고세액공제 2만원도 받을 수 있습니다. 이 HWPX 파일은 서면 제출·사전 검토용 초안으로 활용하세요.'
+        ];
+        if (hasReduction) {
+            notes.unshift(`${result.taxReduction.label}을 적용하므로 간편신고서 대신 본표(별지84)에 ⑪ 감면세액을 적고, 세액감면신청서를 함께 제출해야 합니다.`);
+        }
         return {
             ...formInfo,
-            reason: '복합 사례, 주식 3종목 이상, 여러 자산을 한 번에 정리하는 경우를 대비해 별지 제84호 본표 중심으로 마무리하도록 잡았습니다.',
-            notes: [
-                '별지84는 요약 본표 성격이어서 자산별 양도소득금액 계산명세를 함께 준비해야 할 수 있습니다.',
-                '복수 자산은 자산별 세율, 기본공제 적용 순서, 손익통산 여부를 별도로 맞춘 뒤 본표 합계로 옮기는 것이 안전합니다.'
-            ],
+            reason: hasReduction
+                ? '세액감면을 적용하는 사례는 간편신고서에 감면세액 칸이 없어 별지 제84호 본표로 신고하는 것이 안전합니다.'
+                : '복합 사례, 주식 3종목 이상, 여러 자산을 한 번에 정리하는 경우를 대비해 별지 제84호 본표 중심으로 마무리하도록 잡았습니다.',
+            notes,
             lines: [
                 { label: '③ 세율구분', value: this.getDisplayTaxRate(inputs, result) },
                 { label: '④ 양도소득금액', value: this.formatCurrency(result.incomeAmount) },
@@ -2253,15 +2347,17 @@ class TaxCalculator {
                 { label: '⑧ 과세표준', value: this.formatCurrency(result.taxBaseTotal) },
                 { label: '⑨ 세율', value: this.getDisplayTaxRate(inputs, result) },
                 { label: '⑩ 산출세액', value: this.formatCurrency(result.calculatedTax) },
-                { label: '⑪ 감면세액', value: '해당 시 직접 입력' },
+                { label: '⑪ 감면세액', value: result.taxReduction && result.taxReduction.amount > 0 ? `${this.formatCurrency(result.taxReduction.amount)} (${result.taxReduction.label})` : '해당 시 직접 입력' },
                 { label: '⑫ 외국납부세액공제', value: '해당 시 직접 입력' },
                 { label: '⑬ 원천징수세액공제', value: '해당 시 직접 입력' },
                 { label: '⑭ 연금계좌세액공제', value: '해당 시 직접 입력' },
-                { label: '⑮ 전자신고세액공제', value: '전자신고 시 최대 20,000원 검토' },
-                { label: '⑯ 가산세', value: '해당 시 직접 계산' },
+                { label: '⑮ 전자신고세액공제', value: '홈택스 전자신고 시 20,000원 검토' },
+                { label: '⑯ 가산세', value: this.getSurchargeLabel(result) },
                 { label: '⑰ 기신고·결정·경정세액', value: '해당 시 직접 입력' },
-                { label: '⑱ 납부할 세액', value: this.formatCurrency(result.totalTax) },
-                { label: '⑲ 분납할 세액', value: this.getInstallmentTaxLabel(result.totalTax) }
+                { label: '⑱ 납부할 세액', value: this.formatCurrency(result.nationalTax) },
+                { label: '⑲ 분납할 세액', value: this.getInstallmentTaxLabel(result.nationalTax) },
+                { label: '⑳ 납부세액', value: '분납하지 않으면 ⑱과 동일' },
+                { label: '지방소득세 (별도 신고)', value: this.formatCurrency(result.localTax) }
             ],
             manualFields: [
                 '① 신고인, ② 양수인 인적사항',
@@ -2299,16 +2395,29 @@ class TaxCalculator {
         return `${Math.round(result.taxRate * 100)}%`;
     }
 
-    getInstallmentTaxLabel(totalTax) {
-        if (totalTax <= 10000000) {
+    // 분납(소득세법 §112): 납부할 세액(국세분)이 1천만원 초과 시
+    getInstallmentTaxLabel(nationalTax) {
+        if (nationalTax <= 10000000) {
             return '해당 없음';
         }
 
-        if (totalTax <= 20000000) {
-            return this.formatCurrency(totalTax - 10000000);
+        if (nationalTax <= 20000000) {
+            return `${this.formatCurrency(nationalTax - 10000000)} (납부기한 후 2개월 내)`;
         }
 
-        return `${this.formatCurrency(Math.floor(totalTax / 2))} 이내`;
+        return `${this.formatCurrency(Math.floor(nationalTax / 2))} 이내 (납부기한 후 2개월 내)`;
+    }
+
+    // 신고서 가산세 칸 표시값 (환산취득가액 가산세 + 무신고·납부지연 추정액)
+    getSurchargeLabel(result) {
+        const total = (result.conversionSurcharge || 0) + ((result.filingPenalty && result.filingPenalty.total) || 0);
+        if (total <= 0) {
+            return '해당 없음';
+        }
+        const parts = [];
+        if (result.conversionSurcharge > 0) parts.push(`환산가산세 ${this.formatCurrency(result.conversionSurcharge)}`);
+        if (result.filingPenalty && result.filingPenalty.total > 0) parts.push(`무신고·납부지연 ${this.formatCurrency(result.filingPenalty.total)}`);
+        return `${this.formatCurrency(total)} (${parts.join(', ')})`;
     }
 
     formatCurrency(value) {

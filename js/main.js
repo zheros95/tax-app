@@ -136,10 +136,6 @@ class App {
         );
     }
 
-    shouldAskTempTwoHome(inputs) {
-        return false;
-    }
-
     shouldAskResidencyPeriod(inputs) {
         if (inputs.assetCategory !== 'house') return false;
 
@@ -633,27 +629,6 @@ class App {
                             { label: '농어촌주택 (조특법 §99의4)', detail: '비수도권 읍·면 소재 — 주택 수 산정 제외', value: 'rural_special' },
                             { label: '소형 신축주택·준공 후 미분양주택', detail: '소득령 §167의3②1 — 주택 수 산정 제외', value: 'small_new_unsold' },
                             { label: '인구감소지역·비수도권 인구감소관심지역 주택', detail: '인구감소지역 소재 주택 — 주택 수 산정 제외', value: 'depopulation_area' }
-                        ]
-                    },
-                    {
-                        id: 'temp2House',
-                        title: '2주택이 된 사유가 이사나 갈아타기인가요?',
-                        subtitle: '일시적 2주택 특례 여부를 보기 위한 질문입니다.',
-                        type: 'button',
-                        condition: (inputs) => this.shouldAskTempTwoHome(inputs),
-                        options: [
-                            {
-                                label: '네, 갈아타기입니다',
-                                detail: '기존 집을 나중에 처분할 예정',
-                                value: 'yes',
-                                icon: '예'
-                            },
-                            {
-                                label: '아니오, 다주택입니다',
-                                detail: '일반 다주택 흐름으로 계산',
-                                value: 'no',
-                                icon: '아'
-                            }
                         ]
                     },
                     {
@@ -1214,7 +1189,7 @@ class App {
                     },
                     {
                         id: 'isAdjustedAreaAtTransfer',
-                        title: '양도일 현재 해당 주택은 규제지역인가요?',
+                        title: '양도일 현재 해당 주택은 규제지역(조정대상지역)인가요?',
                         subtitle: (inputs) => {
                             const sellDate = new Date(inputs.sellDate);
                             const gracePeriodEnd = new Date('2026-05-09');
@@ -2499,6 +2474,12 @@ class App {
         subheadline.textContent = result.analysis.subheadline;
 
         document.getElementById('total-tax-display').textContent = fmt(result.totalTax);
+        const breakdownDisplay = document.getElementById('tax-breakdown-display');
+        if (breakdownDisplay) {
+            breakdownDisplay.textContent = result.totalTax > 0
+                ? `양도소득세 ${fmt(result.nationalTax)} + 지방소득세 ${fmt(result.localTax)}`
+                : '';
+        }
         document.getElementById('profit-display').textContent = fmt(result.capitalGains);
         document.getElementById('taxable-gains-display').textContent = fmt(result.taxableGains);
         document.getElementById('tax-rate-display').textContent = result.isNonTaxable && !result.isHighValue
@@ -2965,18 +2946,26 @@ class App {
                 hwpxButton.textContent = '서식 생성 중...';
 
                 try {
-                    await this.hwpxFormFiller.downloadAutoFilledForm({
+                    const fillStats = await this.hwpxFormFiller.downloadAutoFilledForm({
                         guide,
                         inputs: this.inputs,
                         result,
                         calculator: this.calculator
                     });
 
-                    hwpxButton.textContent = '다운로드됨';
+                    if (fillStats && fillStats.filled > 0) {
+                        hwpxButton.textContent = `다운로드됨 — ${fillStats.filled}칸 자동 입력`;
+                        if (fillStats.missed.length > 0) {
+                            console.warn('HWPX 자동채움 실패 셀:', fillStats.missed);
+                            alert(`서식 ${fillStats.filled}칸을 자동 입력했지만 ${fillStats.missed.length}칸은 위치를 찾지 못해 비어 있습니다. 다운로드한 파일에서 빈 칸을 직접 확인해주세요.`);
+                        }
+                    } else {
+                        hwpxButton.textContent = '다운로드됨';
+                    }
                     window.setTimeout(() => {
                         hwpxButton.textContent = originalLabel;
                         hwpxButton.disabled = false;
-                    }, 1600);
+                    }, 2600);
                 } catch (error) {
                     hwpxButton.textContent = hwpxBtnLabel;
                     hwpxButton.disabled = false;
