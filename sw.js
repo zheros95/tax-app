@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tax-calculator-v16';
+const CACHE_NAME = 'tax-calculator-v17';
 const ASSETS = [
     './',
     './index.html',
