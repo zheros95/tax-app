@@ -95,5 +95,28 @@ const r6 = calc.calculate({
 check('중과 유예 절감액 ≥ 0', r6.savingsFromGracePeriod >= 0);
 check('2주택 totalTax 정합', r6.totalTax === r6.nationalTax + r6.localTax);
 
+// ── 7. 조정대상지역 데이터: 2026-07-01 신규 지정(화성동탄·용인기흥·구리) ──
+const regionSrc = readFileSync(new URL('./js/region_data.js', import.meta.url), 'utf8');
+const AREAS = eval(regionSrc + '\n;ADJUSTED_AREA_HISTORY;');
+const groupFor = (district) => AREAS.filter((g) => (g.districts || []).includes(district));
+const hasNewPeriod = (district) => {
+    const gs = groupFor(district);
+    return gs.length === 1 && gs[0].periods.some((p) => p.start === '2026-07-01' && p.end === null);
+};
+const inPeriodOn = (district, date) => {
+    const gs = groupFor(district);
+    return gs.length === 1 && gs[0].periods.some((p) => date >= p.start && date <= (p.end || '9999-12-31'));
+};
+check('구리시: 2026-07-01 신규 지정 단독 그룹', hasNewPeriod('구리시'));
+check('용인시 기흥구: 2026-07-01 신규 지정 단독 그룹', hasNewPeriod('용인시 기흥구'));
+check('동탄: 2026-07-01 신규 지정 단독 그룹', hasNewPeriod('동탄'));
+check('구리 2026-07-02 조정대상 O', inPeriodOn('구리시', '2026-07-02'));
+check('구리 2026-06-30 조정대상 X', !inPeriodOn('구리시', '2026-06-30'));
+check('기흥 옛 지정기간(2021) 유지', inPeriodOn('용인시 기흥구', '2021-01-01'));
+// 오염 방지: 옛 동일그룹의 미지정 도시는 신규 지정에서 제외
+check('군포시: 2026-07-02 조정대상 X (구리와 분리)', !inPeriodOn('군포시', '2026-07-02'));
+check('수원 권선구: 2026-07-02 조정대상 X (기흥과 분리)', !inPeriodOn('수원시 권선구', '2026-07-02'));
+check('안양 만안구: 2026-07-02 조정대상 X (기흥과 분리)', !inPeriodOn('안양시 만안구', '2026-07-02'));
+
 console.log(`\n결과: ${pass} PASS / ${fail} FAIL`);
 process.exit(fail > 0 ? 1 : 0);
