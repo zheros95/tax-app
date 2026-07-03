@@ -110,6 +110,15 @@ const inPeriodOn = (district, date) => {
 check('구리시: 2026-07-01 신규 지정 단독 그룹', hasNewPeriod('구리시'));
 check('용인시 기흥구: 2026-07-01 신규 지정 단독 그룹', hasNewPeriod('용인시 기흥구'));
 check('동탄: 2026-07-01 신규 지정 단독 그룹', hasNewPeriod('동탄'));
+// 화성 동탄구 14개 법정동 커버 + 오판방지 requires:'화성'
+const hwaseongGroup = groupFor('청계동')[0];
+check('화성 동탄구 그룹 존재', !!hwaseongGroup && hwaseongGroup.name.includes('동탄'));
+check("화성 동탄구 requires:'화성' 안전장치", hwaseongGroup && hwaseongGroup.requires === '화성');
+const dongtanDongs = ['금곡동', '능동', '목동', '반송동', '방교동', '산척동', '석우동', '송동', '신동', '여울동', '오산동', '영천동', '장지동', '중동', '청계동'];
+check('동탄구 14개 법정동(+구오산동) 전부 매칭 목록에 포함',
+    hwaseongGroup && dongtanDongs.every((d) => hwaseongGroup.districts.includes(d)),
+    hwaseongGroup ? dongtanDongs.filter((d) => !hwaseongGroup.districts.includes(d)).join(',') : 'no group');
+check('동탄 법정동(목동) 2026-07-02 조정대상 O', inPeriodOn('목동', '2026-07-02'));
 check('구리 2026-07-02 조정대상 O', inPeriodOn('구리시', '2026-07-02'));
 check('구리 2026-06-30 조정대상 X', !inPeriodOn('구리시', '2026-06-30'));
 check('기흥 옛 지정기간(2021) 유지', inPeriodOn('용인시 기흥구', '2021-01-01'));

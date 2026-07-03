@@ -194,6 +194,10 @@ class App {
             });
             if (!matchedDistrict) continue;
 
+            // 흔한 동 이름(목동·중동·금곡동 등)의 오판 방지: requires가 있으면
+            // 그 키워드(예: '화성')가 주소에 있어야만 이 그룹으로 인정한다.
+            if (group.requires && !cleanAddress.includes(group.requires)) continue;
+
             // 주소에 시/도가 명시돼 있으면 그룹의 시/도와 일치해야 매칭 (예: 부산 중구를 인천 중구로 오판 방지)
             if (addressCity && addressCity !== group.city) continue;
 
