@@ -3,12 +3,15 @@
  * Guided UI flow for the capital gains tax helper app.
  */
 
+/** 마법사 커서가 현재 단계의 마지막 질문을 지났음을 나타내는 값 */
+const END_OF_PHASE = '__end_of_phase__';
+
 class App {
     constructor() {
         this.calculator = new TaxCalculator();
         this.hwpxFormFiller = new HWPXFormFiller();
         this.currentPhase = 1;
-        this.currentStepInPhase = 0;
+        this.cursorId = null;
         this.inputs = this.getInitialInputs();
         this.lastResult = null;
         this.phases = this.buildPhases();
@@ -42,7 +45,8 @@ class App {
             houseNonTaxableCategory: '',
             houseCount: null,
             houseCountExclusions: [],     // 주택수 산정 제외 사유 (지방저가/공동상속소수/상속5년/농어촌/소형신축/인구감소)
-            effectiveHouseCount: null,    // 파생값: houseCount - 제외수 (최소 1)
+            effectiveHouseCount: null,    // 파생값: 비과세 판정용 주택 수 (소득령 §154·§155 기준)
+            heavyTaxHouseCount: null,     // 파생값: 다주택 중과 판정용 주택 수 (소득령 §167의3② 기준)
             heavyTaxExemptions: [],       // 양도 시 중과세 제외 사유 (장기임대양도/상속5년양도/1억이하양도/사실상1주택)
             heavyTaxExclusion: '',        // 레거시 (기존 단일 선택) — 호환성 유지
             winwinRentalApplied: '',      // 'yes'|'no'|'unknown' — 상생임대 특례 거주요건 면제
@@ -168,53 +172,119 @@ class App {
         return false;
     }
 
+    /**
+     * 주소의 맨 앞에서 시·도를 인식한다.
+     * 주소는 항상 시·도로 시작하므로 앞에서만 찾아야 '경기도 광주시'를
+     * 광주광역시로 오인하지 않는다.
+     */
+    detectAddressCity(cleanAddress) {
+        const CITY_PATTERNS = [
+            [/^서울/, '서울'], [/^부산/, '부산'], [/^대구/, '대구'], [/^인천/, '인천'],
+            [/^광주/, '광주'], [/^대전/, '대전'], [/^울산/, '울산'], [/^세종/, '세종'],
+            [/^경기/, '경기'], [/^강원/, '강원'],
+            [/^충청북도|^충북/, '충북'], [/^충청남도|^충남/, '충남'],
+            [/^전라북도|^전북/, '전북'], [/^전라남도|^전남/, '전남'],
+            [/^경상북도|^경북/, '경북'], [/^경상남도|^경남/, '경남'],
+            [/^제주/, '제주']
+        ];
+        const hit = CITY_PATTERNS.find(([re]) => re.test(cleanAddress));
+        return hit ? hit[1] : null;
+    }
+
+    /**
+     * 행정구역 이름이 주소에 '토큰 단위'로 들어있는지 본다.
+     * 단순 includes 를 쓰면 '남양주시'가 '양주시'를 포함해 오탐이 나므로
+     * 공백으로 끊은 토큰과 정확히 비교한다.
+     */
+    matchesDistrict(cleanAddress, districtName) {
+        const tokens = cleanAddress.split(/\s+/).filter(Boolean);
+        const parts = districtName.split(/\s+/).filter(Boolean);
+
+        // '성남시 분당구'처럼 복합 표기는 모든 조각이 토큰으로 있어야 인정
+        if (parts.length > 1 && parts.every(p => tokens.includes(p))) return true;
+
+        // 끝 토큰만으로도 인정 ('분당구'만 입력한 경우)
+        const tail = parts[parts.length - 1];
+        if (tokens.includes(tail)) return true;
+
+        // 띄어쓰기 없이 입력한 경우의 보조 매칭: 앞 글자가 한글이면 다른 지명의
+        // 일부일 수 있으므로 제외한다('...남양주시' 안의 '양주시'를 배제).
+        const escaped = tail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        return new RegExp('(^|[^가-힣])' + escaped).test(cleanAddress);
+    }
+
     detectAdjustedArea(address, date) {
         if (!address || !date) return { status: 'incomplete' };
 
         const cleanAddress = address.trim();
         const cleanDate = date.split(' ')[0]; // Handle YYYY-MM-DD formats
-
-        // 주소에 명시된 시/도 (없으면 null)
-        const CITY_KEYWORDS = ['서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종', '경기', '강원', '충북', '충청북도', '충남', '충청남도', '전북', '전라북도', '전남', '전라남도', '경북', '경상북도', '경남', '경상남도', '제주'];
-        const addressCity = CITY_KEYWORDS.find(region => cleanAddress.includes(region)) || null;
+        const addressCity = this.detectAddressCity(cleanAddress);
 
         // 여러 시·도에 같은 이름이 있어 시/도 없이는 특정할 수 없는 구
-        const AMBIGUOUS_DISTRICTS = ['중구', '동구', '서구', '남구', '북구', '강서구'];
+        const AMBIGUOUS_DISTRICTS = ['중구', '동구', '서구', '남구', '북구', '강서구', '수성구', '연제구'];
 
-        const inPeriod = (group) => group.periods.some(p => {
-            const end = p.end || '9999-12-31';
-            return cleanDate >= p.start && cleanDate <= end;
-        });
+        // 해제 효력일(end) 당일은 이미 비조정이므로 end 는 미포함(<)으로 본다.
+        const periodAt = (group) => group.periods.find(p =>
+            cleanDate >= p.start && (!p.end || cleanDate < p.end)
+        );
 
+        const matched = [];
         for (const group of ADJUSTED_AREA_HISTORY) {
-            // 구 이름 매칭 ('성남시 분당구'처럼 시+구 복합이면 끝 토큰('분당구')도 허용)
-            const matchedDistrict = (group.districts || []).find(d => {
-                const tail = d.split(' ').pop();
-                return cleanAddress.includes(d) || cleanAddress.includes(tail);
-            });
+            const matchedDistrict = (group.districts || []).find(d => this.matchesDistrict(cleanAddress, d));
             if (!matchedDistrict) continue;
 
             // 흔한 동 이름(목동·중동·금곡동 등)의 오판 방지: requires가 있으면
             // 그 키워드(예: '화성')가 주소에 있어야만 이 그룹으로 인정한다.
             if (group.requires && !cleanAddress.includes(group.requires)) continue;
 
+            // 광역 그룹('경기 그 외 전지역')에서 따로 관리하는 시·군은 빼낸다.
+            if (group.excludes && group.excludes.some(x => this.matchesDistrict(cleanAddress, x))) continue;
+
             // 주소에 시/도가 명시돼 있으면 그룹의 시/도와 일치해야 매칭 (예: 부산 중구를 인천 중구로 오판 방지)
             if (addressCity && addressCity !== group.city) continue;
 
             // 시/도가 없는데 동명 구로만 걸린 경우는 어느 도시인지 특정 불가 → 직접 확인
             if (!addressCity && AMBIGUOUS_DISTRICTS.includes(matchedDistrict.split(' ').pop())) {
-                return { status: 'unknown' };
+                return { status: 'unknown', reason: 'ambiguous-district' };
             }
 
-            return { status: 'detected', isAdjusted: inPeriod(group) };
+            matched.push({ group, matchedDistrict, period: periodAt(group) });
         }
 
-        // 시/도는 인식됐지만 조정대상 구에 걸리지 않음 → 비조정지역으로 추정
+        if (matched.length > 0) {
+            // 한 주소가 여러 그룹에 걸릴 수 있으므로(시기별 그룹) 지정 기간의 합집합으로 본다.
+            const active = matched.filter(m => m.period);
+            if (active.length === 0) {
+                return {
+                    status: 'detected',
+                    isAdjusted: false,
+                    matchedArea: matched[0].group.name
+                };
+            }
+            // 그 시점에 '일부 읍·면·동만' 지정된 구간이면 단정하지 않고 사용자에게 확인받는다.
+            if (active.every(m => m.period.partial)) {
+                return {
+                    status: 'unknown',
+                    reason: 'partial-designation',
+                    matchedArea: active[0].group.name,
+                    note: active.map(m => m.period.note).filter(Boolean).join(' / ')
+                };
+            }
+            return {
+                status: 'detected',
+                isAdjusted: true,
+                matchedArea: active.find(m => !m.period.partial).group.name
+            };
+        }
+
+        // 시/도는 인식됐지만 조정대상 구에 걸리지 않음
         if (addressCity) {
+            // 데이터가 시·군·구 단위로 완비된 시·도이거나, 애초에 지정 이력이 없는
+            // 시·도(강원·제주 등)이면 비조정으로 확정할 수 있다.
             return { status: 'detected', isAdjusted: false };
         }
 
-        return { status: 'unknown' };
+        return { status: 'unknown', reason: 'no-city' };
     }
 
     getHouseCountOptions(inputs) {
@@ -322,7 +392,10 @@ class App {
                         subtitle: '다음 두 경우 모두 "예"입니다 — ① 원래 갖고 있던 집·땅이 재개발·재건축돼 새 아파트를 받은 경우(원조합원), ② 재개발 입주권을 사서 완공된 아파트를 받은 경우(승계조합원). 다음 화면에서 어느 쪽인지 고르면 그에 맞게 계산해 드립니다.',
                         helper: '재개발·재건축 입주권에서 완공된 주택은 취득가액·장기보유특별공제 계산이 일반 주택과 다릅니다. 특히 원조합원은 관리처분계획 인가 전·후로 나누어 계산합니다. 일반 청약·분양으로 산 새 아파트는 "아니오"입니다.',
                         type: 'button',
-                        condition: (inputs) => inputs.assetCategory === 'house',
+                        // '예'를 고르면 onSelect가 assetCategory를 'right'로 바꾸는데,
+                        // 그때 이 질문이 목록에서 빠지면 뒤로 가서 고를 수 없게 된다.
+                        condition: (inputs) => inputs.assetCategory === 'house'
+                            || inputs.wasFormerMembershipRight === 'yes',
                         onSelect: (inputs, value) => {
                             inputs.wasFormerMembershipRight = value;
                             if (value === 'yes') {
@@ -603,6 +676,7 @@ class App {
                         onSelect: (inputs, value) => {
                             inputs.houseCount = value;
                             inputs.effectiveHouseCount = value;
+                            inputs.heavyTaxHouseCount = value;
                             inputs.houseCountExclusions = [];
                             inputs.heavyTaxExemptions = [];
                             inputs.winwinRentalApplied = '';
@@ -615,24 +689,26 @@ class App {
                     {
                         id: 'houseCountExclusions',
                         title: '보유 주택 중 "주택 수 산정에서 빠지는 집"이 있으신가요?',
-                        subtitle: '아래 해당 항목을 모두 선택하세요. 선택한 만큼 실질 주택 수가 줄어들어, 결과적으로 1주택자로 비과세 흐름을 탈 수도 있습니다.',
-                        helper: '소득세법 시행령 §167의3②(중과 판정 주택수 제외) 및 §155(비과세 판정 주택수 제외)을 단순화한 항목입니다. 잘 모르겠으면 선택하지 않고 넘어가도 됩니다.',
+                        subtitle: '아래 해당 항목을 모두 선택하세요. 항목마다 빠지는 범위가 달라서, 어떤 항목은 중과세 계산에서만 빠지고 비과세 판정에는 그대로 들어갑니다.',
+                        helper: '"비과세 판정"에서 빠지는 것(소득세법 시행령 §154·§155)과 "다주택 중과세 판정"에서 빠지는 것(같은 영 §167의3②)은 근거 조문이 다릅니다. 예를 들어 지방저가주택은 중과세를 매길 때만 빼주고, 1세대 1주택 비과세를 따질 때는 한 채로 그대로 셉니다. 잘 모르겠으면 선택하지 않고 넘어가도 됩니다.',
                         type: 'checklist',
                         selectionMode: 'store',
                         condition: (inputs) => inputs.assetCategory === 'house' && inputs.houseCount >= 2,
                         onSelect: (inputs, values) => {
                             inputs.houseCountExclusions = values || [];
-                            const reduceCount = (values || []).length;
-                            inputs.effectiveHouseCount = Math.max(1, (inputs.houseCount || 0) - reduceCount);
+                            this.applyHouseCountExclusions(inputs);
                         },
                         emptySelectionHint: '해당되는 게 없으면 선택하지 말고 다음으로 넘어가세요.',
+                        // scope: 'nontax'  = 비과세 판정에서만 제외
+                        //        'heavy'   = 다주택 중과 판정에서만 제외
+                        //        'both'    = 둘 다 제외
                         options: [
-                            { label: '지방저가주택 (수도권·광역시·세종 외 기준시가 3억 이하)', detail: '소득령 §167의3②1 — 주택 수 산정 제외', value: 'local_low_price' },
-                            { label: '상속받은 지 5년 이내 상속주택', detail: '소득령 §155② / §167의3①7 — 주택 수 산정 제외', value: 'inherited_within_5yr' },
-                            { label: '공동상속주택 소수지분', detail: '소득령 §167의3②2 — 상속지분이 가장 큰 사람만 주택 수 산입', value: 'inherited_minority_share' },
-                            { label: '농어촌주택 (조특법 §99의4)', detail: '비수도권 읍·면 소재 — 주택 수 산정 제외', value: 'rural_special' },
-                            { label: '소형 신축주택·준공 후 미분양주택', detail: '소득령 §167의3②1 — 주택 수 산정 제외', value: 'small_new_unsold' },
-                            { label: '인구감소지역·비수도권 인구감소관심지역 주택', detail: '인구감소지역 소재 주택 — 주택 수 산정 제외', value: 'depopulation_area' }
+                            { label: '지방저가주택 (수도권·광역시·세종 외 기준시가 3억 이하)', detail: '소득령 §167의3②1 — 중과세 계산에서만 제외 (비과세 판정에는 그대로 셈)', value: 'local_low_price', scope: 'heavy' },
+                            { label: '상속받은 지 5년 이내 상속주택', detail: '소득령 §155② — 비과세 판정에서 제외 (중과세는 별도로 §167의3①7의 중과제외 주택으로 판단)', value: 'inherited_within_5yr', scope: 'nontax' },
+                            { label: '공동상속주택 소수지분', detail: '소득령 §155③·§167의3②2 — 비과세·중과세 모두 제외', value: 'inherited_minority_share', scope: 'both' },
+                            { label: '농어촌주택 (조특법 §99의4)', detail: '비수도권 읍·면 소재 — 비과세 판정에서만 제외', value: 'rural_special', scope: 'nontax' },
+                            { label: '소형 신축주택·준공 후 미분양주택', detail: '조특법 §98의8·§98의9 — 중과세 계산에서만 제외', value: 'small_new_unsold', scope: 'heavy' },
+                            { label: '인구감소지역·비수도권 인구감소관심지역 주택', detail: '조특법 §71의2 — 중과세 계산에서만 제외', value: 'depopulation_area', scope: 'heavy' }
                         ]
                     },
                     {
@@ -654,30 +730,6 @@ class App {
                                 value: true,
                                 icon: '공'
                             }
-                        ]
-                    },
-                    {
-                        id: 'acquiredByGift',
-                        title: '이 부동산을 가족에게서 "증여"받으셨나요?',
-                        subtitle: '돌아가신 분에게 물려받은 상속이 아니라, 살아계실 때 배우자나 부모·자녀 등(배우자·직계존비속)에게서 증여받은 경우를 말합니다.',
-                        helper: '증여받은 부동산을 일정 기간 안에 팔면 "이월과세"가 적용됩니다 — 세금을 증여한 사람이 처음 산 가격·시점 기준으로 다시 계산해 세금이 크게 늘 수 있어요(증여받은 날이 2023년 1월 1일 이후면 10년, 그 전이면 5년 이내 양도 시). 다음 화면에서 증여자가 처음 산 날·가격을 입력하면 자동으로 반영해 드립니다.',
-                        type: 'button',
-                        condition: (inputs) => {
-                            if (inputs.assetCategory === 'house') return (inputs.specialCases || []).includes('inherited');
-                            return inputs.assetCategory === 'other';
-                        },
-                        onSelect: (inputs, value) => {
-                            inputs.acquiredByGift = value;
-                            if (value === 'no') {
-                                inputs.giftRegistrationDate = '';
-                                inputs.donorAcqDate = '';
-                                inputs.donorAcqPrice = 0;
-                                inputs.giftTaxPaid = 0;
-                            }
-                        },
-                        options: [
-                            { label: '예, 가족에게 증여받았어요', detail: '이월과세 검토 — 증여자 취득가액·취득일 기준 재계산', value: 'yes', icon: '증' },
-                            { label: '아니오 (직접 샀거나 상속받음)', detail: '일반 계산', value: 'no', icon: '아' }
                         ]
                     },
                     {
@@ -787,6 +839,30 @@ class App {
                         ]
                     },
                     // ── 임대사업자 특례: 양도 집 종류 ──
+                    {
+                        id: 'acquiredByGift',
+                        title: '이 부동산을 가족에게서 "증여"받으셨나요?',
+                        subtitle: '돌아가신 분에게 물려받은 상속이 아니라, 살아계실 때 배우자나 부모·자녀 등(배우자·직계존비속)에게서 증여받은 경우를 말합니다.',
+                        helper: '증여받은 부동산을 일정 기간 안에 팔면 "이월과세"가 적용됩니다 — 세금을 증여한 사람이 처음 산 가격·시점 기준으로 다시 계산해 세금이 크게 늘 수 있어요(증여받은 날이 2023년 1월 1일 이후면 10년, 그 전이면 5년 이내 양도 시). 다음 화면에서 증여자가 처음 산 날·가격을 입력하면 자동으로 반영해 드립니다.',
+                        type: 'button',
+                        condition: (inputs) => {
+                            if (inputs.assetCategory === 'house') return (inputs.specialCases || []).includes('inherited');
+                            return inputs.assetCategory === 'other';
+                        },
+                        onSelect: (inputs, value) => {
+                            inputs.acquiredByGift = value;
+                            if (value === 'no') {
+                                inputs.giftRegistrationDate = '';
+                                inputs.donorAcqDate = '';
+                                inputs.donorAcqPrice = 0;
+                                inputs.giftTaxPaid = 0;
+                            }
+                        },
+                        options: [
+                            { label: '예, 가족에게 증여받았어요', detail: '이월과세 검토 — 증여자 취득가액·취득일 기준 재계산', value: 'yes', icon: '증' },
+                            { label: '아니오 (직접 샀거나 상속받음)', detail: '일반 계산', value: 'no', icon: '아' }
+                        ]
+                    },
                     {
                         id: 'rentalSaleType',
                         title: '지금 파시는 집은 직접 사신 거주주택인가요, 세입자가 살던 임대주택인가요?',
@@ -1182,17 +1258,13 @@ class App {
                         id: 'isAdjustedAreaAtAcquisition',
                         title: '양도 주택의 취득 당시 규제지역(조정대상지역)이었나요?',
                         subtitle: '1세대 1주택 거주요건과 권리자산 판정에 영향을 줍니다.',
-                        helper: '잘 모르겠다면 결과는 계속 보여주되, 검토 필요 항목으로 남깁니다.',
+                        helper: (inputs) => this.getRegionQuestionHelper(inputs, 'acquisition'),
                         type: 'button',
+                        // 자동 판별은 syncAutoDetectedRegion()에서 미리 끝내둔다.
+                        // condition은 inputs를 건드리지 않는 순수 함수여야 한다(필터가 여러 번 돈다).
                         condition: (inputs) => {
                             if (inputs.assetCategory !== 'house' && inputs.assetCategory !== 'right') return false;
-                            
-                            const detection = this.detectAdjustedArea(inputs.address, inputs.buyDate);
-                            if (detection.status === 'detected') {
-                                inputs.isAdjustedAreaAtAcquisition = detection.isAdjusted ? 'yes' : 'no';
-                                return false; // 자동 판별 성공 시 문항 스킵
-                            }
-                            return true;
+                            return !inputs._autoDetected_isAdjustedAreaAtAcquisition;
                         },
                         options: [
                             { label: '예', detail: '규제지역이었습니다', value: 'yes', icon: '예' },
@@ -1211,15 +1283,11 @@ class App {
                             }
                             return '다주택 중과 여부는 2026년 5월 10일 이후 양도분부터 다시 중요해집니다.';
                         },
+                        helper: (inputs) => this.getRegionQuestionHelper(inputs, 'transfer'),
                         type: 'button',
                         condition: (inputs) => {
                             if (inputs.assetCategory !== 'house' || inputs.houseCount < 2) return false;
-                            const detection = this.detectAdjustedArea(inputs.address, inputs.sellDate);
-                            if (detection.status === 'detected') {
-                                inputs.isAdjustedAreaAtTransfer = detection.isAdjusted ? 'yes' : 'no';
-                                return false; // 자동 판별 성공 시 문항 스킵
-                            }
-                            return true;
+                            return !inputs._autoDetected_isAdjustedAreaAtTransfer;
                         },
                         options: [
                             { label: '예', detail: '규제지역이었습니다', value: 'yes', icon: '예' },
@@ -1230,14 +1298,15 @@ class App {
                     {
                         id: 'isNewlyDesignatedArea',
                         title: '이 주택이 2025년 10월 16일에 "새로" 조정대상지역으로 지정된 곳인가요?',
-                        subtitle: '2025년 10월 16일 새로 지정된 지역(서울 전 자치구, 경기 과천·광명·성남·수원·안양·용인·의왕·하남 등)은 중과 유예 예외 기한이 계약일부터 4개월이 아니라 6개월(2026년 11월 9일까지)로 더 깁니다.',
-                        helper: '계약금까지 받은 매매계약을 2026년 5월 9일 안에 맺었다면, 신규 지정 지역은 그 계약일부터 6개월 안에 잔금을 치르면 다주택 중과를 피할 수 있습니다. 원래부터 조정대상지역이던 곳은 4개월입니다. 잘 모르겠으면 "아니오"를 고르세요(4개월 기준으로 안전하게 계산).',
+                        subtitle: '2025년 10월 16일 새로 지정된 곳은 중과 유예 예외 기한이 계약일부터 4개월이 아니라 6개월(2026년 11월 9일까지)로 더 깁니다.',
+                        helper: '대상은 소득세법 시행령 §167의3①12호의2 나목4)에 정해진 서울 21개 구(강남·서초·송파·용산구는 제외)와 경기 12곳(수원 장안·팔달·영통구, 성남 수정·중원·분당구, 안양 동안구, 과천시, 용인 수지구, 광명시, 하남시, 의왕시)뿐입니다. 강남·서초·송파·용산구와 2026년 7월 1일 지정된 화성 동탄구·용인 기흥구·구리시는 4개월입니다. 잘 모르겠으면 "아니오"를 고르세요(4개월 기준으로 안전하게 계산).',
                         type: 'button',
                         condition: (inputs) => inputs.assetCategory === 'house'
                             && (inputs.effectiveHouseCount ?? inputs.houseCount) >= 2
                             && inputs.isAdjustedAreaAtTransfer === 'yes'
                             && inputs.contractDate
-                            && inputs.contractDate <= '2026-05-09',
+                            && inputs.contractDate <= '2026-05-09'
+                            && !inputs._autoDetected_isNewlyDesignatedArea,
                         options: [
                             { label: '예, 2025년 10월 16일 신규 지정 지역이에요', detail: '유예 예외 기한 6개월 적용', value: 'yes', icon: '신' },
                             { label: '아니오 / 잘 모르겠어요', detail: '기존 조정대상지역 기준 4개월 적용', value: 'no', icon: '기' }
@@ -1655,12 +1724,12 @@ class App {
         document.getElementById('restart-bouncer-btn')?.addEventListener('click', () => this.reset());
 
         this.updatePhaseIndicator();
-        this.updateWizardMeta();
+        this.updateWizardMeta(-1, 0);
     }
 
     startWizard() {
         this.currentPhase = 1;
-        this.currentStepInPhase = 0;
+        this.cursorId = null;
         this.showScreen(this.wizardScreen);
         this.renderQuestion();
     }
@@ -1689,38 +1758,186 @@ class App {
         }
     }
 
-    updateWizardMeta(question, totalQuestions) {
+    updateWizardMeta(stepIndex, totalQuestions) {
         const phaseData = this.phases[this.currentPhase];
         if (this.phaseTitleDisplay) {
             this.phaseTitleDisplay.textContent = phaseData?.title || '사례 분류';
         }
 
         if (this.wizardProgressText) {
-            if (question && totalQuestions) {
-                this.wizardProgressText.textContent = `${this.currentStepInPhase + 1} / ${totalQuestions} 단계`;
+            if (stepIndex >= 0 && totalQuestions) {
+                this.wizardProgressText.textContent = `${stepIndex + 1} / ${totalQuestions} 단계`;
             } else {
                 this.wizardProgressText.textContent = '생활언어로 차근차근 확인합니다.';
             }
         }
     }
 
+    /**
+     * 주택 수 제외 항목을 '비과세 판정용'과 '중과세 판정용'으로 나눠 각각 집계한다.
+     *
+     * 소득세법 시행령 §167의3②(지방저가주택·소형신축 등)은 중과세 대상 주택 수를
+     * 셀 때만 빼주는 규정이고, 1세대 1주택 비과세(§154·§155) 판정에서는 그대로 센다.
+     * 두 기준을 한 숫자로 합치면 2주택자가 비과세를 받아버린다.
+     */
+    applyHouseCountExclusions(inputs) {
+        const optionScopes = this.getHouseCountExclusionScopes();
+        const selected = inputs.houseCountExclusions || [];
+        const total = inputs.houseCount || 0;
+
+        const countFor = (kind) => selected.filter((v) => {
+            const scope = optionScopes[v];
+            return scope === 'both' || scope === kind;
+        }).length;
+
+        inputs.effectiveHouseCount = Math.max(1, total - countFor('nontax'));
+        inputs.heavyTaxHouseCount = Math.max(1, total - countFor('heavy'));
+    }
+
+    getHouseCountExclusionScopes() {
+        if (!this._houseCountExclusionScopes) {
+            const question = Object.values(this.phases)
+                .flatMap((phase) => phase.questions)
+                .find((q) => q.id === 'houseCountExclusions');
+            this._houseCountExclusionScopes = (question?.options || []).reduce((acc, opt) => {
+                acc[opt.value] = opt.scope || 'both';
+                return acc;
+            }, {});
+        }
+        return this._houseCountExclusionScopes;
+    }
+
+    /** 현재 단계의 전체 질문(조건 필터 전). 커서 위치의 기준이 되는 안정된 배열이다. */
+    getPhaseQuestions() {
+        return this.phases[this.currentPhase].questions;
+    }
+
     getCurrentQuestions() {
-        const phaseData = this.phases[this.currentPhase];
-        return phaseData.questions.filter((question) => !question.condition || question.condition(this.inputs));
+        return this.getPhaseQuestions().filter((question) => !question.condition || question.condition(this.inputs));
+    }
+
+    /**
+     * 커서(cursorId)가 가리키는 질문을 찾는다.
+     *
+     * 답을 고르면 condition이 바뀌어 방금 답한 질문이 목록에서 사라지는 경우가 있다.
+     * 배열 인덱스로 전진하면 그때마다 다음 질문 하나가 통째로 건너뛰어지므로,
+     * 위치 기준을 '조건 필터를 거치지 않은 원본 배열의 순서'로 잡는다.
+     */
+    resolveCursorQuestion(visibleQuestions) {
+        if (this.cursorId === END_OF_PHASE) return null;
+        if (!this.cursorId) return visibleQuestions[0] || null;
+
+        const exact = visibleQuestions.find((q) => q.id === this.cursorId);
+        if (exact) return exact;
+
+        // 커서가 가리키던 질문이 조건 변화로 사라짐 → 원본 배열 기준 그 다음 질문으로
+        const all = this.getPhaseQuestions();
+        const pos = all.findIndex((q) => q.id === this.cursorId);
+        if (pos < 0) return visibleQuestions[0] || null;
+        return visibleQuestions.find((q) => all.indexOf(q) > pos) || null;
     }
 
     getQuestionText(value) {
         return typeof value === 'function' ? value(this.inputs) : value;
     }
 
+    /**
+     * 주소·날짜가 갖춰지면 조정대상지역을 자동 판별해 입력값에 반영한다.
+     * 질문 필터(condition)는 렌더 한 번에도 여러 번 호출되므로, 상태를 바꾸는
+     * 이 작업은 렌더 직전에 딱 한 번만 수행한다.
+     * 판별이 확정되지 않으면(status !== 'detected') 플래그를 세우지 않아
+     * 해당 질문이 화면에 그대로 노출된다.
+     */
+    syncAutoDetectedRegion() {
+        const pairs = [
+            ['isAdjustedAreaAtAcquisition', 'buyDate'],
+            ['isAdjustedAreaAtTransfer', 'sellDate']
+        ];
+        for (const [field, dateField] of pairs) {
+            const flag = '_autoDetected_' + field;
+            const detection = this.detectAdjustedArea(this.inputs.address, this.inputs[dateField]);
+            this.inputs['_regionDetection_' + field] = detection;
+
+            if (detection.status === 'detected') {
+                // 사용자가 직접 고른 값은 덮어쓰지 않는다.
+                if (!this.inputs[flag] && !this.inputs['_userSet_' + field]) {
+                    this.inputs[field] = detection.isAdjusted ? 'yes' : 'no';
+                    this.inputs[flag] = true;
+                }
+            } else {
+                this.inputs[flag] = false;
+            }
+        }
+
+        // 중과 유예 예외 6개월 대상(소득령 §167의3①12호의2 나목4)은
+        // '2025.10.16.에 지정된 지역'과 정확히 일치하므로 주소로 자동 판별한다.
+        if (!this.inputs._userSet_isNewlyDesignatedArea) {
+            const newly = this.detectNewlyDesignated2025(this.inputs.address);
+            if (newly !== null) {
+                this.inputs.isNewlyDesignatedArea = newly ? 'yes' : 'no';
+                this.inputs._autoDetected_isNewlyDesignatedArea = true;
+            } else {
+                this.inputs._autoDetected_isNewlyDesignatedArea = false;
+            }
+        }
+    }
+
+    /**
+     * 2025.10.16.자 신규 지정 지역인지 판별한다.
+     * 판별 불가면 null(사용자에게 직접 묻는다).
+     */
+    detectNewlyDesignated2025(address) {
+        if (!address) return null;
+        const cleanAddress = address.trim();
+        const addressCity = this.detectAddressCity(cleanAddress);
+        if (!addressCity) return null;
+
+        let matchedAny = false;
+        for (const group of ADJUSTED_AREA_HISTORY) {
+            if (addressCity !== group.city) continue;
+            if (!(group.districts || []).some(d => this.matchesDistrict(cleanAddress, d))) continue;
+            if (group.requires && !cleanAddress.includes(group.requires)) continue;
+            if (group.excludes && group.excludes.some(x => this.matchesDistrict(cleanAddress, x))) continue;
+            matchedAny = true;
+            if (group.periods.some(p => p.start === '2025-10-16')) return true;
+        }
+        return matchedAny ? false : null;
+    }
+
+    /**
+     * 조정대상지역 질문 아래에 '왜 묻는지 / 무엇을 확인해야 하는지'를 보여준다.
+     */
+    getRegionQuestionHelper(inputs, kind) {
+        const field = kind === 'acquisition' ? 'isAdjustedAreaAtAcquisition' : 'isAdjustedAreaAtTransfer';
+        const dateLabel = kind === 'acquisition' ? '취득일' : '양도일';
+        const dateValue = kind === 'acquisition' ? inputs.buyDate : inputs.sellDate;
+        const detection = inputs['_regionDetection_' + field];
+        const base = `${dateLabel}(${dateValue || '미입력'}) 기준으로 판단합니다. 잘 모르겠다면 결과는 계속 보여주되, 검토 필요 항목으로 남깁니다.`;
+
+        if (!detection) return base;
+        if (detection.reason === 'partial-designation') {
+            return `주소가 "${detection.matchedArea}"에 해당하는데, 이 시기에는 시·군 전역이 아니라 일부 지역만 규제지역이었습니다. ${detection.note ? '(' + detection.note + ') ' : ''}${base}`;
+        }
+        if (detection.reason === 'ambiguous-district') {
+            return `같은 이름의 구가 여러 도시에 있어 자동으로 판단하지 못했습니다. 주소를 '시·도'부터 입력하면 자동 판별됩니다. ${base}`;
+        }
+        if (detection.reason === 'no-city') {
+            return `주소에서 시·도를 찾지 못해 자동 판별하지 못했습니다. 예: '경기도 성남시 분당구 정자동'. ${base}`;
+        }
+        return base;
+    }
+
     renderQuestion() {
         this.updatePhaseIndicator();
+        this.syncAutoDetectedRegion();
 
         const effectiveQuestions = this.getCurrentQuestions();
-        if (this.currentStepInPhase >= effectiveQuestions.length) {
+        const question = this.resolveCursorQuestion(effectiveQuestions);
+
+        if (!question) {
             if (this.currentPhase < 3) {
                 this.currentPhase += 1;
-                this.currentStepInPhase = 0;
+                this.cursorId = null;
                 this.renderQuestion();
             } else {
                 this.calculateAndShowResult();
@@ -1728,34 +1945,18 @@ class App {
             return;
         }
 
-        const question = effectiveQuestions[this.currentStepInPhase];
-        this.updateWizardMeta(question, effectiveQuestions.length);
+        this.cursorId = question.id;
+        const stepIndex = effectiveQuestions.indexOf(question);
+        this.updateWizardMeta(stepIndex, effectiveQuestions.length);
 
         this.questionContainer.innerHTML = '';
-
-        // Auto-detect adjusted area when rendering the question
-        if (question.id === 'isAdjustedAreaAtAcquisition' && this.inputs.address && this.inputs.buyDate) {
-            const detection = this.detectAdjustedArea(this.inputs.address, this.inputs.buyDate);
-            if (detection.status === 'detected' && !this.inputs._autoDetected_isAdjustedAreaAtAcquisition) {
-                this.inputs.isAdjustedAreaAtAcquisition = detection.isAdjusted ? 'yes' : 'no';
-                this.inputs._autoDetected_isAdjustedAreaAtAcquisition = true; // Mark as auto-detected once
-            }
-        }
-        
-        if (question.id === 'isAdjustedAreaAtTransfer' && this.inputs.address && this.inputs.sellDate) {
-            const detection = this.detectAdjustedArea(this.inputs.address, this.inputs.sellDate);
-            if (detection.status === 'detected' && !this.inputs._autoDetected_isAdjustedAreaAtTransfer) {
-                this.inputs.isAdjustedAreaAtTransfer = detection.isAdjusted ? 'yes' : 'no';
-                this.inputs._autoDetected_isAdjustedAreaAtTransfer = true;
-            }
-        }
 
         const slide = document.createElement('div');
         slide.className = 'question-slide active';
 
         const meta = document.createElement('div');
         meta.className = 'question-meta';
-        meta.textContent = `${this.currentStepInPhase + 1} / ${effectiveQuestions.length}`;
+        meta.textContent = `${stepIndex + 1} / ${effectiveQuestions.length}`;
         slide.appendChild(meta);
 
         const title = document.createElement('h3');
@@ -1836,6 +2037,8 @@ class App {
 
             button.addEventListener('click', () => {
                 this.inputs[question.id] = option.value;
+                // 사용자가 직접 고른 값은 자동 판별이 덮어쓰지 않도록 표시한다.
+                this.inputs['_userSet_' + question.id] = true;
                 let shouldContinue = true;
                 if (question.onSelect) {
                     shouldContinue = question.onSelect(this.inputs, option.value) !== false;
@@ -2400,7 +2603,8 @@ class App {
 
         const nextButton = document.createElement('button');
         nextButton.className = 'btn-primary large';
-        const isLastStep = this.currentStepInPhase === this.getCurrentQuestions().length - 1;
+        const visibleNow = this.getCurrentQuestions();
+        const isLastStep = visibleNow.length > 0 && visibleNow[visibleNow.length - 1].id === this.cursorId;
         nextButton.textContent = isLastStep ? '결과 보기' : '다음';
         nextButton.addEventListener('click', () => {
             for (const dateField of dateFields) {
@@ -2430,13 +2634,27 @@ class App {
     }
 
     nextStep() {
-        this.currentStepInPhase += 1;
+        // 방금 답한 질문이 조건 변화로 목록에서 사라졌을 수 있으므로,
+        // 원본 배열에서의 위치를 기준으로 '그 뒤의 첫 노출 질문'을 찾는다.
+        const all = this.getPhaseQuestions();
+        const visible = this.getCurrentQuestions();
+        const pos = all.findIndex((q) => q.id === this.cursorId);
+        const next = visible.find((q) => all.indexOf(q) > pos);
+
+        this.cursorId = next ? next.id : END_OF_PHASE;
         this.renderQuestion();
     }
 
     prevStep() {
-        if (this.currentStepInPhase > 0) {
-            this.currentStepInPhase -= 1;
+        const all = this.getPhaseQuestions();
+        const visible = this.getCurrentQuestions();
+        const pos = this.cursorId === END_OF_PHASE
+            ? all.length
+            : all.findIndex((q) => q.id === this.cursorId);
+        const earlier = visible.filter((q) => all.indexOf(q) < pos);
+
+        if (earlier.length > 0) {
+            this.cursorId = earlier[earlier.length - 1].id;
             this.renderQuestion();
             return;
         }
@@ -2444,7 +2662,9 @@ class App {
         if (this.currentPhase > 1) {
             this.currentPhase -= 1;
             const previousQuestions = this.getCurrentQuestions();
-            this.currentStepInPhase = Math.max(0, previousQuestions.length - 1);
+            this.cursorId = previousQuestions.length > 0
+                ? previousQuestions[previousQuestions.length - 1].id
+                : null;
             this.renderQuestion();
             return;
         }
@@ -3114,9 +3334,9 @@ class App {
         this.inputs = this.getInitialInputs();
         this.lastResult = null;
         this.currentPhase = 1;
-        this.currentStepInPhase = 0;
+        this.cursorId = null;
         this.updatePhaseIndicator();
-        this.updateWizardMeta();
+        this.updateWizardMeta(-1, 0);
         this.showScreen(this.introScreen);
     }
 

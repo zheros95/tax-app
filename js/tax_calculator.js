@@ -283,7 +283,7 @@ class TaxCalculator {
                 && acquisitionCost > 0)
                 ? Math.floor(acquisitionCost * 0.05) : 0);
         // 예정신고 기한 경과 시 무신고·납부지연 가산세 추정 (오늘 기한 후 신고·납부 가정)
-        const filingPenalty = this.getFilingPenalty(inputs, decisionTax);
+        const filingPenalty = this.getFilingPenalty(inputs, decisionTax, inputs.asOfDate);
         // 신고서(국세분)에 적는 납부할 세액 — 지방소득세는 별도 신고이므로 제외
         const nationalTax = decisionTax + conversionSurcharge + filingPenalty.total;
         const totalTax = nationalTax + localTax;
@@ -403,8 +403,13 @@ class TaxCalculator {
             houseTaxView: rawInputs.houseTaxView || '',
             houseNonTaxableCategory: rawInputs.houseNonTaxableCategory || '',
             houseCount: Number(rawInputs.houseCount || 1),
+            // 비과세 판정용 주택 수 (소득령 §154·§155)
             effectiveHouseCount: rawInputs.effectiveHouseCount != null
                 ? Number(rawInputs.effectiveHouseCount)
+                : Number(rawInputs.houseCount || 1),
+            // 중과 판정용 주택 수 (소득령 §167의3②) — 제외 사유가 서로 달라 별도로 센다
+            heavyTaxHouseCount: rawInputs.heavyTaxHouseCount != null
+                ? Number(rawInputs.heavyTaxHouseCount)
                 : Number(rawInputs.houseCount || 1),
             temp2House: rawInputs.temp2House || 'no',
             specialCases: Array.isArray(rawInputs.specialCases) ? rawInputs.specialCases : [],
@@ -420,6 +425,7 @@ class TaxCalculator {
             buyDate: rawInputs.buyDate || '',
             contractDate: rawInputs.contractDate || '',
             sellDate: rawInputs.sellDate || '',
+            asOfDate: rawInputs.asOfDate || '', // 가산세 기준일(테스트용 주입, 평소엔 오늘)
             newHomeContractDate: rawInputs.newHomeContractDate || '',
             marriageDate: rawInputs.marriageDate || '',
             cohabitationDate: rawInputs.cohabitationDate || '',
@@ -946,7 +952,9 @@ class TaxCalculator {
     }
 
     checkHeavyTax(inputs) {
-        const effectiveCount = inputs.effectiveHouseCount ?? inputs.houseCount;
+        // 중과 판정 주택 수는 비과세 판정용(effectiveHouseCount)과 제외 사유가 다르다.
+        // 소득령 §167의3②(지방저가주택·소형신축·인구감소지역 등)은 여기서만 빠진다.
+        const effectiveCount = inputs.heavyTaxHouseCount ?? inputs.houseCount;
         if (inputs.type !== 'house' || effectiveCount < 2) {
             return { isApplicable: false, addRate: 0 };
         }
@@ -1265,12 +1273,13 @@ class TaxCalculator {
     }
 
     // 무신고·납부지연 가산세 추정 (국기법 §47의2·§47의4, §48②1 기한 후 신고 감면) — 오늘 신고·납부 가정
-    getFilingPenalty(inputs, decisionTax) {
+    // asOfDate: 기준일 주입용(테스트에서 시간을 고정하기 위함). 없으면 실제 오늘.
+    getFilingPenalty(inputs, decisionTax, asOfDate) {
         const none = { total: 0, noFiling: 0, latePayment: 0, daysLate: 0, reductionRate: 0, dueDate: null };
         if (decisionTax <= 0 || !inputs.sellDate) return none;
         const due = this.getFilingDueDate(inputs);
         if (!due) return none;
-        const today = new Date();
+        const today = asOfDate ? this.toDate(asOfDate) || new Date(asOfDate) : new Date();
         if (today <= due) return { ...none, dueDate: due };
         const daysLate = Math.floor((today - due) / 86400000);
         const addMonths = (d, m) => new Date(d.getFullYear(), d.getMonth() + m, d.getDate());
@@ -1334,7 +1343,7 @@ class TaxCalculator {
             } else {
                 statusLabel = '일반과세';
                 headline = '중과세는 적용되지 않았습니다.';
-                subheadline = inputs.effectiveHouseCount >= 2
+                subheadline = (inputs.heavyTaxHouseCount ?? inputs.houseCount) >= 2
                     ? '현재 입력 기준으로 다주택 중과 요건에는 해당하지 않아 기본세율 흐름으로 계산했습니다.'
                     : '실질 1주택 흐름으로 계산했습니다.';
             }
@@ -1445,7 +1454,7 @@ class TaxCalculator {
                 path.push('현재 입력값 기준으로 다주택 중과 요건에 해당해 중과세율을 반영했습니다.');
             } else {
                 path.push(
-                    inputs.effectiveHouseCount >= 2
+                    (inputs.heavyTaxHouseCount ?? inputs.houseCount) >= 2
                         ? '현재 입력값 기준으로 다주택 중과 요건에는 해당하지 않아 기본세율 흐름으로 계산했습니다.'
                         : '실질 1주택 일반과세 흐름으로 계산했습니다.'
                 );
@@ -1493,7 +1502,7 @@ class TaxCalculator {
         // ── 상속주택 상속개시 5년 내 양도 중과배제 안내 ──
         if (
             inputs.type === 'house'
-            && (inputs.effectiveHouseCount ?? inputs.houseCount) >= 2
+            && (inputs.heavyTaxHouseCount ?? inputs.houseCount) >= 2
             && special.includes('inherited')
             && inputs.inheritanceSaleType === 'inherited'
         ) {
@@ -2114,7 +2123,7 @@ class TaxCalculator {
             });
         } else if (
             inputs.type === 'house' &&
-            inputs.effectiveHouseCount >= 2 &&
+            (inputs.heavyTaxHouseCount ?? inputs.houseCount) >= 2 &&
             inputs.isAdjustedAreaAtTransfer === 'yes'
         ) {
             if (this.toDate(inputs.sellDate) < this.toDate('2026-05-10')) {
