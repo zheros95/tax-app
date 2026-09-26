@@ -202,5 +202,60 @@ app.inputs.newHomeContractDate = '2022-06-01'; // 새 집 취득 후 3년 넘겨
 r = app.calculator.calculate(app.inputs);
 check('일시적 2주택(3년 초과): 과세', !r.isNonTaxable && r.totalTax > 0, `isNonTaxable=${r.isNonTaxable} totalTax=${r.totalTax}`);
 
+// ── 8. 결과 세 줄 요약 ──
+const briefFor = (setup) => {
+    startSimple(setup.count || 1);
+    Object.assign(app.inputs, setup.inputs);
+    app.syncAutoDetectedRegion();
+    if (setup.residency) app.inputs.residencyPeriod = app.computeResidencyYears(app.inputs);
+    app.finalizeAmounts();
+    const res = app.calculator.calculate(app.inputs);
+    return { res, brief: app.buildResultBrief(res) };
+};
+
+let b = briefFor({ inputs: {
+    address: '서울특별시 노원구 상계동 100', buyDate: '2015-03-02', sellDate: '2026-09-01', holdingPeriod: 11.5,
+    isJointOwnership: false, transferPrice: 900000000, acqPrice_real: 500000000
+} });
+check('요약: 1주택 비과세 → "낼 세금이 없어요"', b.brief.taxHeadline === '낼 세금이 없어요', b.brief.taxHeadline);
+check('요약: 1주택 비과세 이유에 요건 나열', b.brief.why.includes('1세대 1주택 비과세') && b.brief.why.includes('보유'), b.brief.why);
+check('요약: 1주택 비과세 → 신고 불필요·버튼 숨김', b.brief.filing.includes('신고하지 않아도') && b.brief.needsFiling === false, b.brief.filing);
+
+b = briefFor({ inputs: {
+    address: '서울특별시 강남구 대치동 100', buyDate: '2019-03-02', sellDate: '2026-09-01', holdingPeriod: 7.5,
+    isJointOwnership: false, transferPrice: 1500000000, acqPrice_real: 900000000,
+    moveInDate: '2019-03-02', moveOutDate: '2020-06-01'
+}, residency: true });
+check('요약: 거주요건 미충족 → 이유에 2년 실거주 언급', b.brief.why.includes('2년') && b.brief.why.includes('실거주'), b.brief.why);
+check('요약: 과세 → 기한과 홈택스 안내', b.brief.needsFiling && b.brief.filing.includes('까지') && b.brief.filing.includes('홈택스'), b.brief.filing);
+check('요약: 과세 → 세금 머리글에 금액', /^예상 세금 [\d,]+원$/.test(b.brief.taxHeadline), b.brief.taxHeadline);
+
+b = briefFor({ inputs: {
+    address: '서울특별시 강남구 대치동 100', buyDate: '2015-03-02', sellDate: '2026-09-01', holdingPeriod: 11.5,
+    isJointOwnership: false, transferPrice: 1500000000, acqPrice_real: 900000000,
+    moveInDate: '2015-03-02'
+}, residency: true });
+check('요약: 고가주택 → 이유에 12억 초과분', b.res.isHighValue && b.brief.why.includes('12억'), b.brief.why);
+check('요약: 고가주택 → 신고 필요', b.brief.needsFiling && b.brief.filing.includes('신고'), b.brief.filing);
+
+b = briefFor({ count: 2, inputs: {
+    address: '경기도 수원시 영통구 망포동 1', buyDate: '2018-01-05', sellDate: '2026-09-01', holdingPeriod: 8.6,
+    newHomeContractDate: '2022-06-01', isJointOwnership: false, transferPrice: 800000000, acqPrice_real: 400000000
+} });
+check('요약: 일시적 2주택 기한 초과 → 이유에 3년', b.brief.why.includes('3년'), b.brief.why);
+
+b = briefFor({ count: 2, inputs: {
+    address: '경기도 수원시 영통구 망포동 1', buyDate: '2018-01-05', sellDate: '2026-09-01', holdingPeriod: 8.6,
+    newHomeContractDate: '2024-06-01', isJointOwnership: false, transferPrice: 800000000, acqPrice_real: 400000000
+} });
+check('요약: 일시적 2주택 충족 → 이유에 일시적 2주택 비과세', b.brief.why.includes('일시적 2주택 비과세'), b.brief.why);
+
+b = briefFor({ inputs: {
+    address: '서울특별시 강남구 대치동 100', buyDate: '2019-03-02', sellDate: '2026-03-01', holdingPeriod: 7.0,
+    isJointOwnership: false, transferPrice: 1500000000, acqPrice_real: 900000000,
+    moveInDate: '2019-03-02', moveOutDate: '2020-06-01', asOfDate: '2026-09-26'
+}, residency: true });
+check('요약: 기한 경과 → 가산세 안내', b.res.filingPenalty.daysLate > 0 && b.brief.filing.includes('가산세') && b.brief.taxSub.includes('가산세'), b.brief.filing);
+
 console.log(`\n${pass} PASS / ${fail} FAIL`);
 process.exit(fail ? 1 : 0);

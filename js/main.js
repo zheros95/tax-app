@@ -2103,6 +2103,8 @@ class App {
         document.getElementById('prev-btn')?.addEventListener('click', () => this.prevStep());
         document.getElementById('restart-btn')?.addEventListener('click', () => this.reset());
         document.getElementById('restart-bouncer-btn')?.addEventListener('click', () => this.reset());
+        document.getElementById('details-toggle-btn')?.addEventListener('click', () => this.toggleResultDetails());
+        document.getElementById('brief-filing-btn')?.addEventListener('click', () => this.showFilingValues());
 
         this.updatePhaseIndicator();
         this.updateWizardMeta(-1, 0);
@@ -3258,10 +3260,20 @@ class App {
         const headline = document.getElementById('result-headline');
         const subheadline = document.getElementById('result-subheadline');
 
+        const brief = this.buildResultBrief(result);
         statusBadge.className = `status-badge ${result.analysis.tone}`;
         statusBadge.textContent = result.analysis.statusLabel;
-        headline.textContent = result.analysis.headline;
-        subheadline.textContent = result.analysis.subheadline;
+        headline.textContent = brief.taxHeadline;
+        subheadline.textContent = brief.taxSub;
+
+        const whyEl = document.getElementById('brief-why');
+        if (whyEl) whyEl.textContent = brief.why;
+        const filingEl = document.getElementById('brief-filing');
+        if (filingEl) filingEl.textContent = brief.filing;
+        const filingBtn = document.getElementById('brief-filing-btn');
+        if (filingBtn) filingBtn.classList.toggle('is-hidden', !brief.needsFiling);
+        // 상세 내용은 접어 두고, 필요한 사람만 펼쳐 본다
+        this.setResultDetails(false);
 
         document.getElementById('total-tax-display').textContent = fmt(result.totalTax);
         const breakdownDisplay = document.getElementById('tax-breakdown-display');
@@ -3305,11 +3317,9 @@ class App {
             result.analysis.decisionPath,
             'list'
         );
-        this.renderSimpleList(
-            document.getElementById('caution-list'),
-            result.analysis.cautions.length ? result.analysis.cautions : ['현재 입력 기준에서 추가 검토 경고는 없습니다.'],
-            'list'
-        );
+        const cautionSection = document.getElementById('result-cautions-section');
+        if (cautionSection) cautionSection.style.display = result.analysis.cautions.length ? '' : 'none';
+        this.renderSimpleList(document.getElementById('caution-list'), result.analysis.cautions, 'list');
         this.renderSimpleList(
             document.getElementById('document-list'),
             result.analysis.documents,
@@ -3322,6 +3332,147 @@ class App {
         this.renderRedevGuide(this.inputs, result);
         this.renderNonTaxableChecklist(result.nonTaxableChecklist);
         this.renderCalculationSteps(result.calculationSteps);
+    }
+
+    /**
+     * 결과 첫 화면의 세 줄: ① 세금 얼마 ② 왜 ③ 신고해야 하는지와 기한.
+     * 세법 용어 대신 사용자가 답한 사실을 되짚는 문장으로 쓴다. 나머지 근거는 접어 둔다.
+     */
+    buildResultBrief(result) {
+        const inputs = this.inputs;
+        const won = (value) => `${Math.floor(value).toLocaleString('ko-KR')}원`;
+        const isHouse = inputs.type === 'house';
+        const isStock = inputs.type === 'stock';
+        const checks = result.nonTaxableChecklist || [];
+        const cautions = (result.analysis && result.analysis.cautions) || [];
+        const penalty = result.filingPenalty || { total: 0, daysLate: 0, dueDate: null };
+        const fullyNonTaxable = Boolean(result.isNonTaxable && !result.isHighValue);
+        // 과세분이 조금이라도 있으면(고가주택 초과분 포함) 세액이 0이어도 예정신고 대상이다
+        const needsFiling = !fullyNonTaxable;
+        const due = penalty.dueDate || this.calculator.getFilingDueDate(inputs);
+        const dueLabel = due ? `${due.getFullYear()}년 ${due.getMonth() + 1}월 ${due.getDate()}일` : '';
+        const dueClause = dueLabel ? `${dueLabel}까지` : '양도한 달의 말일부터 2개월 안에';
+
+        // ① 세금
+        let taxHeadline;
+        let taxSub;
+        if (result.totalTax <= 0) {
+            taxHeadline = '낼 세금이 없어요';
+            taxSub = fullyNonTaxable ? '예상 양도소득세 0원' : '양도차익이 없거나 공제하고 나면 남는 금액이 없어요';
+        } else {
+            taxHeadline = `예상 세금 ${won(result.totalTax)}`;
+            taxSub = `양도소득세 ${won(result.nationalTax)} + 지방소득세 ${won(result.localTax)}`
+                + (penalty.total > 0 ? ` (기한 경과 가산세 ${won(penalty.total)} 포함)` : '');
+        }
+
+        // ② 왜
+        const special = inputs.specialCases || [];
+        const failed = checks.find((c) => c.pass === false);
+        let why;
+        if (isStock) {
+            why = '주식등 양도소득은 비과세 없이 세율 구분에 따라 계산했어요.';
+        } else if (!isHouse) {
+            why = `${result.analysis.caseLabel} 흐름이에요. 양도차익 ${won(result.capitalGains)}에서 장기보유특별공제와 기본공제를 뺀 ${won(result.taxBaseTotal)}에 세율을 적용했어요.`;
+        } else if (fullyNonTaxable) {
+            const reasons = checks
+                .filter((c) => c.pass === true && c.label !== '비과세 적용')
+                .map((c) => this.plainCheckLabel(c));
+            const kind = inputs.temp2House === 'yes' && inputs.effectiveHouseCount === 2 ? '일시적 2주택 비과세' : '1세대 1주택 비과세';
+            why = `${reasons.length ? reasons.join(', ') + '. ' : ''}${kind} 요건을 모두 충족해서 세금이 없어요.`;
+        } else if (result.isNonTaxable && result.isHighValue) {
+            why = `비과세 요건은 충족했지만 12억 원을 넘는 고가주택이라, 양도차익 중 12억 초과분(${Math.round(result.taxableRatio * 100)}%)에만 세금이 붙어요.`;
+        } else if (special.includes('unregistered')) {
+            why = '등기를 하지 않고 판 미등기 양도라 비과세·공제 없이 70% 세율이 적용돼요.';
+        } else if (special.includes('nonResident')) {
+            why = '해외에 사는 비거주자는 1세대 1주택 비과세를 받을 수 없어서 일반 과세예요.';
+        } else if (failed) {
+            why = this.explainFailedCheck(failed, result);
+        } else if (result.nonTaxableInfo && result.nonTaxableInfo.needsReview && result.nonTaxableInfo.message) {
+            why = result.nonTaxableInfo.message;
+        } else {
+            why = result.analysis.subheadline;
+        }
+
+        // ③ 신고
+        let filing;
+        if (fullyNonTaxable && result.totalTax <= 0) {
+            filing = cautions.length
+                ? `비과세로 계산됐지만 아래 "먼저 확인할 것"이 맞는지 봐주세요. 비과세가 맞으면 신고하지 않아도 되고, 아니라면 ${dueClause} 신고해야 해요.`
+                : '신고하지 않아도 돼요. 1세대 1주택 비과세는 신고 의무가 없어요. 국세청에서 안내문이 오면 매매계약서와 주민등록초본으로 비과세라고 알리면 돼요.';
+        } else if (penalty.daysLate > 0) {
+            filing = `신고 기한(${dueLabel})이 ${penalty.daysLate}일 지났어요. 지금 신고하면 가산세 ${won(penalty.total)}이 붙어요(위 세금에 포함). 더 늦을수록 커지니 홈택스에서 바로 기한 후 신고하세요.`;
+        } else if (isStock) {
+            filing = `주식은 양도한 반기의 말일부터 2개월 안에 예정신고해요. ${dueClause} 홈택스에서 신고하세요.`;
+        } else if (result.taxReduction && result.taxReduction.amount > 0) {
+            filing = `${dueClause} 홈택스에서 예정신고해야 감면을 받을 수 있어요. 신고하지 않으면 감면이 적용되지 않아요.`;
+        } else if (result.totalTax <= 0) {
+            filing = `낼 세금은 없지만 과세 대상 거래라 ${dueClause} 홈택스에서 예정신고는 해야 해요.`;
+        } else {
+            filing = `${dueClause} 홈택스에서 예정신고하고 납부하세요. 양도한 달의 말일부터 2개월이에요.`
+                + (result.isHighValue ? ' 고가주택 초과분에 세금이 있어서 비과세 요건을 채웠어도 신고는 해야 해요.' : '');
+        }
+
+        return { taxHeadline, taxSub, why, filing, needsFiling };
+    }
+
+    /** 비과세 판정 체크 항목을 생활 언어로 바꾼다. */
+    plainCheckLabel(check) {
+        const label = check.label || '';
+        if (label === '1세대 1주택') return '세대 기준 집 한 채';
+        if (label === '일시적 2주택 특례') return '새 집을 산 뒤 3년 안에 판매';
+        if (label.startsWith('보유기간')) return `${this.calculator.formatYears(this.inputs.holdingPeriod)} 보유`;
+        if (label.startsWith('거주기간')) return `${Math.floor(this.inputs.residencyPeriod)}년 실거주`;
+        if (label === '거주요건 해당 없음') return '규제지역 밖에서 사서 거주요건 없음';
+        if (label === '고가주택 해당 없음') return '판 가격 12억 이하';
+        return label;
+    }
+
+    /** 비과세가 안 된 첫 번째 이유를 사용자의 답변에 빗대어 설명한다. */
+    explainFailedCheck(failed, result) {
+        const label = failed.label || '';
+        const heavyNote = result.isHeavyTaxApplicable ? ' 규제지역 다주택이라 중과세율까지 붙었어요.' : '';
+        if (label.startsWith('거주기간')) {
+            return `규제지역에서 산 집이라 2년 이상 실제로 살아야 비과세인데, 실거주가 ${Math.floor(this.inputs.residencyPeriod)}년이라 요건을 못 채웠어요. 그래서 일반 과세예요.`;
+        }
+        if (label.startsWith('보유기간')) {
+            return `보유기간이 2년이 안 돼서(${this.calculator.formatYears(this.inputs.holdingPeriod)}) 비과세가 안 되고 단기 보유 세율이 적용돼요.`;
+        }
+        if (label === '일시적 2주택 특례') {
+            const message = (result.tempTwoHomeInfo && result.tempTwoHomeInfo.message) || '';
+            if (message.includes('1년이 지나기 전')) {
+                return '이 집을 산 지 1년이 지나기 전에 새 집을 사서 일시적 2주택 요건(1년 뒤 취득)이 안 돼요. 그래서 2주택 과세예요.' + heavyNote;
+            }
+            const deadlineLabel = (result.tempTwoHomeInfo && result.tempTwoHomeInfo.deadlineLabel) || '확인 필요';
+            return `새 집을 산 뒤 3년 안에 이 집을 팔아야 일시적 2주택 비과세인데, 기한(${deadlineLabel})을 넘겨서 2주택 과세예요.${heavyNote}`;
+        }
+        if (label === '1세대 1주택') {
+            return `세대 기준 ${this.inputs.effectiveHouseCount}주택이라 1세대 1주택 비과세 대상이 아니에요.${heavyNote}`;
+        }
+        if (label.includes('임대사업자')) {
+            return '임대주택 자체를 파는 경우라 거주주택 비과세 특례를 받을 수 없어요.';
+        }
+        return failed.detail || failed.label;
+    }
+
+    setResultDetails(open) {
+        const details = document.getElementById('result-details');
+        const toggle = document.getElementById('details-toggle-btn');
+        this.resultDetailsOpen = Boolean(open);
+        if (details) details.classList.toggle('is-hidden', !this.resultDetailsOpen);
+        if (toggle) toggle.textContent = this.resultDetailsOpen ? '자세한 내용 접기' : '계산 근거 자세히 보기';
+    }
+
+    toggleResultDetails() {
+        this.setResultDetails(!this.resultDetailsOpen);
+    }
+
+    /** 신고해야 하는 사람에게: 상세를 펼치고 서식 입력값 카드로 바로 이동한다. */
+    showFilingValues() {
+        this.setResultDetails(true);
+        const card = document.getElementById('filing-guide-card');
+        if (card && typeof card.scrollIntoView === 'function') {
+            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
     }
 
     renderRedevGuide(inputs, result) {

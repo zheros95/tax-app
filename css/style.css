@@ -1574,3 +1574,86 @@ body {
 .is-hidden {
     display: none !important;
 }
+
+/* ── 결과 세 줄 요약 ── */
+.result-brief {
+    margin-top: var(--space-lg);
+    padding: var(--space-lg);
+    display: grid;
+    gap: var(--space-md);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 251, 245, 0.8));
+    border: 1px solid var(--line);
+    border-radius: var(--radius-xl);
+}
+
+.brief-row {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: var(--space-sm);
+    align-items: start;
+}
+
+.brief-key {
+    display: inline-flex;
+    justify-content: center;
+    padding: 6px 0;
+    border-radius: 999px;
+    background: var(--neutral-bg);
+    color: var(--neutral-text);
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.brief-text {
+    margin: 2px 0 0;
+    font-size: 1.04rem;
+    line-height: 1.65;
+    color: var(--text-main);
+}
+
+.brief-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 4px;
+}
+
+.brief-actions .btn-primary {
+    padding: 13px 18px;
+}
+
+.result-cautions {
+    padding: var(--space-md) var(--space-lg);
+    background: var(--warn-bg);
+    border: 1px solid rgba(141, 74, 19, 0.18);
+    border-radius: var(--radius-lg);
+    color: var(--warn-text);
+}
+
+.result-cautions h3 {
+    color: var(--warn-text);
+}
+
+.result-cautions .bullet-list {
+    color: inherit;
+}
+
+.result-details {
+    margin-top: var(--space-sm);
+}
+
+@media (max-width: 540px) {
+    .brief-row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+    }
+
+    .brief-key {
+        width: 56px;
+    }
+
+    .brief-actions .btn-primary,
+    .brief-actions .btn-secondary {
+        width: 100%;
+    }
+}
