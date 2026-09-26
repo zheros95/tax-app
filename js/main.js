@@ -14,13 +14,23 @@ class App {
         this.cursorId = null;
         this.inputs = this.getInitialInputs();
         this.lastResult = null;
-        this.phases = this.buildPhases();
+        // 'simple': 사실만 묻는 8화면 안팎의 간편 흐름(기본) / 'detailed': 기존 상세 흐름
+        this.mode = 'simple';
+        this.skipQuestionIds = new Set();
+        this.detailedEntry = null;
+        this.detailedPhases = this.buildPhases();
+        this.simplePhases = this.buildSimplePhases();
 
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => this.init());
         } else {
             this.init();
         }
+    }
+
+    /** 현재 모드의 질문 단계. 기존 코드가 this.phases를 쓰므로 getter로 유지한다. */
+    get phases() {
+        return this.mode === 'simple' ? this.simplePhases : this.detailedPhases;
     }
 
     getInitialInputs() {
@@ -122,7 +132,14 @@ class App {
             giftRegistrationDate: '',      // 증여등기일(증여받은 날)
             donorAcqDate: '',              // 증여자가 처음 취득한 날
             donorAcqPrice: 0,              // 증여자의 당초 취득가액
-            giftTaxPaid: 0                 // 납부한 증여세
+            giftTaxPaid: 0,                // 납부한 증여세
+            // 간편 흐름 전용 (사실 답변)
+            simpleHouseCount: null,        // 1 | 2 | 'twoOther' | 3
+            simpleSituations: [],          // '특별한 사정' 체크 값
+            acqPriceUnknown: false,        // 취득 계약서 없음 → 환산취득가액
+            neverLived: false,             // 이 집에 산 적 없음
+            moveInDate: '',                // 전입일
+            moveOutDate: ''                // 전출일(비우면 양도일까지 거주)
         };
     }
 
@@ -1703,6 +1720,369 @@ class App {
         };
     }
 
+
+    /**
+     * 간편 흐름(기본 진입).
+     * 세법 판단은 앱이 하고 사용자는 '있었던 사실'만 답하도록 8화면 안팎으로 줄였다.
+     * 다루는 사례: 집 1채, 또는 이사 때문에 잠시 2채가 된 경우의 주택 양도.
+     * 그 밖의 사정(상속·증여, 재개발, 임대사업, 상가주택 등)은 두 번째 화면에서 걸러
+     * 상세 흐름(buildPhases)으로 보낸다. 상세 흐름과 같은 입력 키를 쓰므로 계산기는 그대로다.
+     */
+    buildSimplePhases() {
+        const regionOptions = [
+            { label: '예, 규제지역이었어요', value: 'yes', icon: '예' },
+            { label: '아니오', value: 'no', icon: '아' },
+            { label: '잘 모르겠어요', detail: '결과에 확인할 항목으로 표시해요', value: 'unknown', icon: '?' }
+        ];
+
+        return {
+            1: {
+                title: '우리 집 상황',
+                questions: [
+                    {
+                        id: 'simpleHouseCount',
+                        title: '나와 배우자, 같이 사는 가족 이름으로 된 집이 모두 몇 채인가요?',
+                        subtitle: '지금 파는 집도 포함해서 세어주세요. 따로 사는 배우자 명의 집도 우리 집으로 셉니다. 사람이 살고 있는 오피스텔, 2021년 이후에 산 분양권·입주권도 한 채예요.',
+                        type: 'button',
+                        onSelect: (inputs, value) => {
+                            if (value === 1 || value === 2) {
+                                this.applySimpleBaseline(value);
+                                return true;
+                            }
+                            if (value === 'twoOther') {
+                                // 결혼·상속·봉양 등 사유별 특례는 상세 흐름의 분류 질문에서 고른다
+                                this.applySimpleBaseline(2);
+                                this.switchToDetailed(
+                                    { houseNonTaxableCategory: '', houseTaxView: '', temp2House: 'no', newAssetType: '' },
+                                    ['assetCategory', 'wasFormerMembershipRight']
+                                );
+                                return false;
+                            }
+                            // 3채 이상: 다주택 과세 흐름(주택 수는 상세 흐름에서 다시 고른다)
+                            this.applySimpleBaseline(3);
+                            this.switchToDetailed(
+                                {
+                                    houseNonTaxableCategory: 'taxable', houseTaxView: 'taxable',
+                                    houseCount: null, effectiveHouseCount: null, heavyTaxHouseCount: null,
+                                    temp2House: 'no', newAssetType: ''
+                                },
+                                ['assetCategory', 'wasFormerMembershipRight', 'houseNonTaxableCategory']
+                            );
+                            return false;
+                        },
+                        options: [
+                            { label: '1채', detail: '지금 파는 집뿐이에요', value: 1, icon: '1' },
+                            { label: '2채, 이사하려고 새 집을 먼저 샀어요', detail: '새 집 산 날짜를 다음에 여쭤봐요', value: 2, icon: '2' },
+                            { label: '2채, 이사 말고 다른 이유예요', detail: '결혼·상속·부모님 모심·투자 등. 사유를 이어서 여쭤봐요', value: 'twoOther', icon: '2' },
+                            { label: '3채 이상', detail: '다주택 계산으로 이어져요', value: 3, icon: '3' }
+                        ]
+                    },
+                    {
+                        id: 'simpleSituations',
+                        title: '혹시 아래에 해당하는 게 있나요?',
+                        subtitle: '하나라도 해당되면 계산 방식이 달라져서 몇 가지를 더 여쭤봐요. 없으면 그대로 넘어가면 돼요.',
+                        type: 'checklist',
+                        emptyNextLabel: '해당되는 게 없어요',
+                        options: (inputs) => {
+                            const two = inputs.temp2House === 'yes';
+                            const list = [
+                                { label: '파는 게 집이 아니에요 (상가·토지·분양권·입주권·주식)', value: 'not_house' },
+                                { label: '파는 집이 재개발·재건축으로 새로 받은 아파트예요', value: 'redevelopment' },
+                                {
+                                    label: two
+                                        ? '두 집 중 상속받았거나 가족에게 증여받은 집이 있어요'
+                                        : '파는 집을 상속받았거나 가족에게 증여받았어요',
+                                    value: 'inherited_or_gift'
+                                }
+                            ];
+                            if (two) {
+                                list.push({ label: '새로 산 게 아직 완공 안 된 분양권·입주권이에요', value: 'new_is_right' });
+                                list.push({ label: '임대사업자로 등록한 집이 있어요 (세무서·구청 등록)', value: 'rental' });
+                            }
+                            list.push(
+                                { label: '파는 건물에 상가나 사무실이 같이 있어요', value: 'mixed_use' },
+                                { label: '다가구주택(원룸 건물 등)을 통째로 팔아요', value: 'multi_family' },
+                                { label: '마당·텃밭 등 넓은 땅이 딸린 단독주택이에요', value: 'large_land' },
+                                { label: '지금 해외에 살고 있어요', value: 'overseas' }
+                            );
+                            return list;
+                        },
+                        onSelect: (inputs, values) => {
+                            inputs.simpleSituations = values;
+                            // 뒤로 왔다가 답을 바꿔도 이전 분기의 플래그가 남지 않게 매번 다시 세운다
+                            this.applySimpleBaseline(inputs.houseCount);
+                            const route = this.routeSimpleSituations(values);
+                            if (route) {
+                                this.switchToDetailed(route.presets, route.skip);
+                                return false;
+                            }
+                            return true;
+                        }
+                    },
+                    {
+                        id: 'newHomeContractDate',
+                        title: '새 집의 잔금을 치른 날은 언제인가요?',
+                        subtitle: '이 날짜로 "이사 때문에 잠시 2채"인지 앱이 판단해요. 잔금보다 등기를 먼저 했다면 등기 접수일이에요.',
+                        helper: '매매계약서의 잔금 지급일이나 등기부등본(등기사항전부증명서)의 접수일에서 확인할 수 있어요.',
+                        type: 'date_single',
+                        condition: (inputs) => inputs.temp2House === 'yes'
+                    }
+                ]
+            },
+            2: {
+                title: '위치와 날짜',
+                questions: [
+                    {
+                        id: 'address',
+                        title: '파는 집 주소를 적어주세요.',
+                        subtitle: '시·도부터 동까지면 충분해요. 예: 경기도 성남시 분당구 정자동',
+                        helper: '주소로 규제지역(조정대상지역) 여부를 자동으로 확인해요. 규제지역에서 산 집은 2년 실거주 요건이 붙어서 꼭 필요해요.',
+                        type: 'text',
+                        placeholder: '예: 서울특별시 노원구 상계동'
+                    },
+                    {
+                        id: 'dates',
+                        title: '이 집을 산 날과 판 날은 언제인가요?',
+                        subtitle: '둘 다 잔금을 치른 날이에요. 계약한 날이나 이사한 날이 아니에요. 잔금보다 등기를 먼저 했다면 등기 접수일이에요.',
+                        helper: '매매계약서의 잔금 지급일이나 등기부등본(등기사항전부증명서)의 접수일에서 확인할 수 있어요. 아직 잔금 전이면 잔금 예정일을 넣어도 돼요.',
+                        type: 'date_group',
+                        fields: () => [
+                            { id: 'buyDate', label: '산 날 (취득 잔금일)' },
+                            { id: 'sellDate', label: '판 날 (양도 잔금일)' }
+                        ]
+                    },
+                    {
+                        id: 'isAdjustedAreaAtAcquisition',
+                        title: '이 집을 살 때 그 동네가 규제지역(조정대상지역)이었나요?',
+                        subtitle: '주소만으로는 자동 확인이 안 돼서 여쭤봐요. 모르면 "잘 모르겠어요"를 누르세요. 결과에서 확인할 항목으로 알려드려요.',
+                        helper: (inputs) => this.getRegionQuestionHelper(inputs, 'acquisition'),
+                        type: 'button',
+                        condition: (inputs) => !inputs._autoDetected_isAdjustedAreaAtAcquisition,
+                        options: regionOptions
+                    },
+                    {
+                        id: 'isAdjustedAreaAtTransfer',
+                        title: '파는 날 기준으로 그 동네가 규제지역(조정대상지역)인가요?',
+                        subtitle: '집이 2채일 때 필요한 확인이에요. 모르면 "잘 모르겠어요"를 누르세요.',
+                        helper: (inputs) => this.getRegionQuestionHelper(inputs, 'transfer'),
+                        type: 'button',
+                        condition: (inputs) => inputs.houseCount >= 2 && !inputs._autoDetected_isAdjustedAreaAtTransfer,
+                        options: regionOptions
+                    }
+                ]
+            },
+            3: {
+                title: '금액',
+                questions: [
+                    {
+                        id: 'isJointOwnership',
+                        title: '이 집 등기는 누구 이름으로 되어 있나요?',
+                        subtitle: '공동명의면 세금을 반씩 나눠 계산해요.',
+                        type: 'button',
+                        options: [
+                            { label: '나 혼자', detail: '단독명의', value: false, icon: '단' },
+                            { label: '배우자 등과 공동명의', detail: '지분 50:50 기준으로 계산해요', value: true, icon: '공' }
+                        ]
+                    },
+                    {
+                        id: 'simplePrices',
+                        title: (inputs) => inputs.isJointOwnership ? '집 전체를 얼마에 팔고, 얼마에 샀나요?' : '얼마에 팔고, 얼마에 샀나요?',
+                        subtitle: (inputs) => inputs.isJointOwnership
+                            ? '계약서에 적힌 금액을 만원 단위로 적어주세요. 공동명의여도 집 전체 금액이에요. 지분 계산은 앱이 해요.'
+                            : '계약서에 적힌 금액을 만원 단위로 적어주세요.',
+                        type: 'currency_group',
+                        fields: () => [
+                            { id: 'transferPrice', label: '판 가격 (양도가액)', required: true },
+                            { id: 'acqPrice_real', label: '산 가격 (취득가액)', required: true, hiddenWhen: 'acqPriceUnknown' }
+                        ],
+                        toggles: [
+                            {
+                                id: 'acqPriceUnknown',
+                                label: '산 가격을 몰라요 (취득 계약서가 없어요)',
+                                hint: '그러면 산 해와 판 해의 공시가격으로 취득가액을 추정해요. 다음 화면에서 여쭤볼게요.',
+                                onChange: (inputs, checked) => {
+                                    inputs.acquisitionMethod = checked ? 'estimated' : 'real';
+                                    if (checked) inputs.acqPrice_real = 0;
+                                }
+                            }
+                        ]
+                    },
+                    {
+                        id: 'simpleEstimatedPrices',
+                        title: '산 해와 판 해의 공시가격을 적어주세요.',
+                        subtitle: '산 가격을 모를 때는 "판 가격 × (산 해 공시가격 ÷ 판 해 공시가격)"으로 취득가액을 추정해요(환산취득가액). 단위는 만원이에요.',
+                        helper: '공시가격은 부동산공시가격 알리미(realtyprice.kr)에서 주소로 연도별 조회할 수 있어요. 아파트·빌라는 공동주택가격, 단독주택은 개별주택가격이에요.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.acquisitionMethod === 'estimated',
+                        fields: () => [
+                            { id: 'transferTaxBase', label: '판 해의 공시가격', required: true },
+                            { id: 'acquisitionTaxBase', label: '산 해의 공시가격', required: true }
+                        ]
+                    },
+                    {
+                        id: 'simpleResidency',
+                        title: '이 집에 실제로 살았나요? 살았다면 언제부터 언제까지인가요?',
+                        subtitle: (inputs) => {
+                            const adj = inputs.isAdjustedAreaAtAcquisition;
+                            if (inputs.buyDate >= '2017-08-03' && (adj === 'yes' || adj === 'unknown')) {
+                                return '규제지역에서 산 집은 2년 이상 실제로 살아야 세금이 안 나와요. 그래서 꼭 필요해요.';
+                            }
+                            return '12억 원이 넘는 집은 실제로 산 기간만큼 세금을 더 깎아줘요.';
+                        },
+                        helper: '전입·전출 날짜는 주민등록초본에서 확인할 수 있어요. 아직 살고 있으면 나간 날은 비워두세요. 두 번 이상 나눠 살았다면 합친 기간이 중요하니 결과 화면의 확인 항목을 참고하세요.',
+                        type: 'residency_dates',
+                        condition: (inputs) => {
+                            // 거주기간이 세금에 영향을 줄 때만 묻는다:
+                            // ① 2017.8.3 이후 규제지역 취득(2년 거주 요건) ② 12억 초과 고가주택(장기보유특별공제 표2)
+                            const adj = inputs.isAdjustedAreaAtAcquisition;
+                            const mandatory = inputs.buyDate >= '2017-08-03' && (adj === 'yes' || adj === 'unknown');
+                            const highValue = Number(inputs.transferPrice || 0) > 1200000000;
+                            return mandatory || highValue;
+                        }
+                    },
+                    {
+                        id: 'simpleExpenses',
+                        title: '집을 사고팔 때 든 비용이 있나요?',
+                        subtitle: '모르거나 없으면 비워두세요. 0원으로 계산해요. 영수증·계산서가 있는 것만 인정돼요. 단위는 만원이에요.',
+                        helper: '도배·장판·싱크대 교체 같은 단순 수리는 빼주지 않아요. 발코니 확장, 새시 교체, 보일러 교체, 난방 배관 공사처럼 집의 뼈대나 설비를 바꾼 큰 공사만 해당해요.',
+                        type: 'currency_group',
+                        condition: (inputs) => inputs.acquisitionMethod === 'real',
+                        fields: () => [
+                            { id: 'acqTax', label: '살 때 낸 취득세·등기비용 (법무사 수수료 포함)' },
+                            { id: 'acqBrokerFee', label: '살 때 낸 중개수수료' },
+                            { id: 'sellBrokerFee', label: '팔 때 낸 중개수수료' },
+                            { id: 'capitalExpenditure', label: '큰 수리비 (확장·새시·보일러 등)' }
+                        ]
+                    }
+                ]
+            }
+        };
+    }
+
+    /**
+     * 간편 흐름의 분류 플래그를 세대 주택 수에 맞춰 다시 세운다.
+     * 사실 답변(주소·날짜·금액 등)은 남기고, 상세 흐름용 특례 플래그는 모두 초기화한다.
+     */
+    applySimpleBaseline(count) {
+        const fresh = this.getInitialInputs();
+        const keepKeys = new Set([
+            'sellerName', 'residencyStatus',
+            'simpleHouseCount', 'simpleSituations',
+            'address', 'buyDate', 'sellDate', 'holdingPeriod', 'newHomeContractDate',
+            'isAdjustedAreaAtAcquisition', 'isAdjustedAreaAtTransfer',
+            'isJointOwnership', 'acquisitionMethod', 'acqPriceUnknown',
+            'transferPrice', 'acqPrice_real', 'acqTax', 'acqBrokerFee', 'acqLegalFee',
+            'sellBrokerFee', 'sellTaxFee', 'capitalExpenditure',
+            'transferTaxBase', 'acquisitionTaxBase',
+            'neverLived', 'moveInDate', 'moveOutDate', 'residencyPeriod'
+        ]);
+        Object.keys(fresh).forEach((key) => {
+            if (!keepKeys.has(key)) this.inputs[key] = fresh[key];
+        });
+
+        const isTwo = count === 2;
+        Object.assign(this.inputs, {
+            assetCategory: 'house',
+            type: 'house',
+            wasFormerMembershipRight: 'no',
+            houseCount: count,
+            effectiveHouseCount: count,
+            heavyTaxHouseCount: count,
+            houseTaxView: 'nonTaxable',
+            houseNonTaxableCategory: isTwo ? 'tempTwoHome' : 'singleHome',
+            temp2House: isTwo ? 'yes' : 'no',
+            newAssetType: isTwo ? 'house' : '',
+            acquisitionMethod: this.inputs.acquisitionMethod || 'real'
+        });
+    }
+
+    /**
+     * '특별한 사정' 체크 결과를 상세 흐름의 입력값으로 옮긴다.
+     * null을 돌려주면 간편 흐름을 그대로 이어간다.
+     */
+    routeSimpleSituations(values) {
+        const inputs = this.inputs;
+        const has = (key) => values.includes(key);
+
+        // 해외 거주는 계산기가 비거주자 비과세 차단을 처리하므로 간편 흐름 안에서 끝낼 수 있다
+        if (has('overseas')) {
+            inputs.specialCases = [...(inputs.specialCases || []), 'nonResident'];
+        }
+        if (!values.some((v) => v !== 'overseas')) return null;
+
+        if (has('not_house')) {
+            return {
+                presets: {
+                    assetCategory: '', type: '', houseCount: null, effectiveHouseCount: null, heavyTaxHouseCount: null,
+                    houseTaxView: '', houseNonTaxableCategory: '', temp2House: 'no', newAssetType: '', specialCases: []
+                },
+                skip: []
+            };
+        }
+
+        const skip = ['assetCategory', 'wasFormerMembershipRight', 'houseNonTaxableCategory'];
+
+        if (has('redevelopment')) {
+            // 상세 흐름의 wasFormerMembershipRight='예'와 같은 상태로 만들고 원조합원/승계 질문부터 잇는다
+            return {
+                presets: {
+                    wasFormerMembershipRight: 'yes', assetCategory: 'right', type: 'right',
+                    rightType: 'membership', redevSaleType: 'after_completion',
+                    houseCount: 1, effectiveHouseCount: 1, heavyTaxHouseCount: 1,
+                    houseTaxView: '', houseNonTaxableCategory: '', temp2House: 'no', newAssetType: ''
+                },
+                skip
+            };
+        }
+
+        const special = [...(inputs.specialCases || [])];
+        const property = [];
+        if (has('inherited_or_gift')) special.push('inherited');
+        if (has('rental')) special.push('rental');
+        if (has('mixed_use')) property.push('mixed_use_building');
+        if (has('multi_family')) property.push('multi_family_whole');
+        if (has('large_land')) property.push('large_land_house');
+
+        const presets = {
+            specialCases: [...new Set([...special, ...property])],
+            propertySpecialCases: property
+        };
+
+        const isTwo = inputs.houseCount === 2;
+        if (isTwo && (has('inherited_or_gift') || has('rental'))) {
+            // 상속·임대 특례는 상세 흐름의 '사연이 있어요' 분류에서 사유별 질문을 받는다
+            Object.assign(presets, {
+                houseNonTaxableCategory: 'specialNonTaxable', houseTaxView: 'nonTaxable',
+                houseCount: null, effectiveHouseCount: null, heavyTaxHouseCount: null,
+                temp2House: 'no', newAssetType: ''
+            });
+        } else if (isTwo && has('new_is_right')) {
+            // 새 자산이 분양권·입주권이면 상세 흐름의 newAssetType 질문으로 종류를 받는다
+            presets.newAssetType = '';
+        }
+        // 1채는 'singleHome' 분류를 유지한 채 상세 흐름으로 간다.
+        //  - 상속·증여: specialCases의 'inherited'가 증여(이월과세) 질문을 연다
+        //  - 상가주택·다가구·넓은 부수토지: 집 특성 질문(면적 등)을 받는다
+        return { presets, skip };
+    }
+
+    /**
+     * 전입·전출일로 '보유기간 중 실제 거주한 햇수'를 계산한다.
+     * 취득 전에 살던 기간은 빼고(보유기간 중 거주만 인정), 전출일이 없으면 양도일까지 산 것으로 본다.
+     */
+    computeResidencyYears(inputs) {
+        if (inputs.neverLived || !inputs.moveInDate) return 0;
+        const buy = this.toDate(inputs.buyDate);
+        const sell = this.toDate(inputs.sellDate);
+        const moveIn = this.toDate(inputs.moveInDate);
+        const moveOut = this.toDate(inputs.moveOutDate) || sell;
+        if (!moveIn || !moveOut) return 0;
+        const start = buy && buy > moveIn ? buy : moveIn;
+        const end = sell && sell < moveOut ? sell : moveOut;
+        if (end <= start) return 0;
+        return Number(((end - start) / (1000 * 60 * 60 * 24) / 365.25).toFixed(2));
+    }
+
     init() {
         this.introScreen = document.getElementById('intro-screen');
         this.wizardScreen = document.getElementById('wizard-screen');
@@ -1718,7 +2098,8 @@ class App {
             3: document.getElementById('phase-3')
         };
 
-        document.getElementById('start-btn')?.addEventListener('click', () => this.startWizard());
+        document.getElementById('start-btn')?.addEventListener('click', () => this.startWizard('simple'));
+        document.getElementById('start-detailed-btn')?.addEventListener('click', () => this.startWizard('detailed'));
         document.getElementById('prev-btn')?.addEventListener('click', () => this.prevStep());
         document.getElementById('restart-btn')?.addEventListener('click', () => this.reset());
         document.getElementById('restart-bouncer-btn')?.addEventListener('click', () => this.reset());
@@ -1727,10 +2108,38 @@ class App {
         this.updateWizardMeta(-1, 0);
     }
 
-    startWizard() {
+    startWizard(mode = 'simple') {
+        this.mode = mode;
+        this.skipQuestionIds = new Set();
+        this.detailedEntry = null;
         this.currentPhase = 1;
         this.cursorId = null;
         this.showScreen(this.wizardScreen);
+        this.renderQuestion();
+    }
+
+    /**
+     * 간편 흐름에서 상세 흐름으로 넘어간다.
+     * presets: 간편 흐름에서 확정한 값, skipIds: 상세 흐름에서 다시 묻지 않을 질문 id.
+     */
+    switchToDetailed(presets = {}, skipIds = []) {
+        Object.assign(this.inputs, presets);
+        this.skipQuestionIds = new Set(skipIds);
+        this.detailedEntry = { phase: this.currentPhase, cursorId: this.cursorId };
+        this.mode = 'detailed';
+        this.currentPhase = 1;
+        this.cursorId = null;
+        this.renderQuestion();
+    }
+
+    /** 상세 흐름 첫 질문에서 뒤로 가면 간편 흐름의 마지막 화면으로 돌아간다. */
+    returnToSimple() {
+        const entry = this.detailedEntry;
+        this.detailedEntry = null;
+        this.skipQuestionIds = new Set();
+        this.mode = 'simple';
+        this.currentPhase = entry ? entry.phase : 1;
+        this.cursorId = entry ? entry.cursorId : null;
         this.renderQuestion();
     }
 
@@ -1750,6 +2159,8 @@ class App {
         });
 
         for (let i = 1; i <= 3; i += 1) {
+            const labelEl = this.phaseEls[i].querySelector('.phase-label');
+            if (labelEl) labelEl.textContent = this.phases[i].title;
             if (i < this.currentPhase) {
                 this.phaseEls[i].classList.add('completed');
             } else if (i === this.currentPhase) {
@@ -1796,7 +2207,7 @@ class App {
 
     getHouseCountExclusionScopes() {
         if (!this._houseCountExclusionScopes) {
-            const question = Object.values(this.phases)
+            const question = Object.values(this.detailedPhases)
                 .flatMap((phase) => phase.questions)
                 .find((q) => q.id === 'houseCountExclusions');
             this._houseCountExclusionScopes = (question?.options || []).reduce((acc, opt) => {
@@ -1813,7 +2224,12 @@ class App {
     }
 
     getCurrentQuestions() {
-        return this.getPhaseQuestions().filter((question) => !question.condition || question.condition(this.inputs));
+        return this.getPhaseQuestions().filter((question) => {
+            // 간편 흐름에서 이미 확정한 분류 질문은 상세 흐름에서 다시 묻지 않는다
+            // (다시 고르면 onSelect가 간편 흐름의 답을 지워버린다).
+            if (this.mode === 'detailed' && this.skipQuestionIds.has(question.id)) return false;
+            return !question.condition || question.condition(this.inputs);
+        });
     }
 
     /**
@@ -2005,6 +2421,9 @@ class App {
             case 'currency_group':
                 this.renderCurrencyGroup(content, question);
                 break;
+            case 'residency_dates':
+                this.renderResidencyDates(content, question);
+                break;
             default:
                 break;
         }
@@ -2092,15 +2511,25 @@ class App {
 
         const nextButton = document.createElement('button');
         nextButton.className = 'btn-primary large';
-        nextButton.textContent = '다음';
+        // '모름'과 '해당 없음'을 구분: 아무것도 고르지 않았을 때의 버튼 문구를 질문이 정할 수 있다
+        const emptyNextLabel = this.getQuestionText(question.emptyNextLabel);
+        const refreshNextLabel = () => {
+            const anyChecked = Boolean(list.querySelector('input:checked'));
+            nextButton.textContent = (!anyChecked && emptyNextLabel) ? emptyNextLabel : '다음';
+        };
+        list.addEventListener('change', refreshNextLabel);
+        refreshNextLabel();
         nextButton.addEventListener('click', () => {
             const selected = Array.from(list.querySelectorAll('input:checked')).map((node) => node.value);
+            let shouldContinue = true;
             if (question.onSelect) {
-                question.onSelect(this.inputs, selected);
+                shouldContinue = question.onSelect(this.inputs, selected) !== false;
             } else {
                 this.inputs[question.id] = selected;
             }
-            this.nextStep();
+            if (shouldContinue) {
+                this.nextStep();
+            }
         });
 
         container.appendChild(nextButton);
@@ -2531,9 +2960,13 @@ class App {
         const dateFields = [];
 
         const fields = typeof question.fields === 'function' ? question.fields(this.inputs) : question.fields;
+        const fieldWraps = {};
+        const isFieldHidden = (field) => Boolean(field.hiddenWhen && this.inputs[field.hiddenWhen]);
         fields.forEach((field) => {
             const fieldWrap = document.createElement('div');
             fieldWrap.className = 'stack compact';
+            if (isFieldHidden(field)) fieldWrap.classList.add('is-hidden');
+            fieldWraps[field.id] = fieldWrap;
 
             const label = document.createElement('label');
             label.className = 'input-label';
@@ -2542,7 +2975,7 @@ class App {
             const input = document.createElement('input');
             input.type = 'number';
             input.className = 'text-input';
-            input.placeholder = '금액 (만원)';
+            input.placeholder = field.placeholder || '금액 (만원)';
             input.value = this.inputs[field.id] > 0 ? this.inputs[field.id] / 10000 : '';
             input.addEventListener('input', (event) => {
                 this.inputs[field.id] = Number(event.target.value || 0) * 10000;
@@ -2603,9 +3036,45 @@ class App {
 
         const nextButton = document.createElement('button');
         nextButton.className = 'btn-primary large';
-        const visibleNow = this.getCurrentQuestions();
-        const isLastStep = visibleNow.length > 0 && visibleNow[visibleNow.length - 1].id === this.cursorId;
-        nextButton.textContent = isLastStep ? '결과 보기' : '다음';
+        const refreshNextLabel = () => {
+            const visibleNow = this.getCurrentQuestions();
+            const isLastStep = visibleNow.length > 0 && visibleNow[visibleNow.length - 1].id === this.cursorId;
+            nextButton.textContent = isLastStep ? '결과 보기' : '다음';
+        };
+
+        // 질문 단위 토글(예: "산 가격을 몰라요"): 켜면 지정한 입력칸을 숨기고 후속 질문을 바꾼다
+        (question.toggles || []).forEach((toggle) => {
+            const row = document.createElement('label');
+            row.className = 'checklist-item toggle-row';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = Boolean(this.inputs[toggle.id]);
+            const text = document.createElement('span');
+            text.textContent = toggle.label;
+            row.appendChild(checkbox);
+            row.appendChild(text);
+            wrapper.appendChild(row);
+
+            if (toggle.hint) {
+                const hint = document.createElement('p');
+                hint.className = 'field-helper toggle-hint';
+                hint.textContent = toggle.hint;
+                wrapper.appendChild(hint);
+            }
+
+            checkbox.addEventListener('change', () => {
+                this.inputs[toggle.id] = checkbox.checked;
+                if (toggle.onChange) toggle.onChange(this.inputs, checkbox.checked);
+                fields.forEach((field) => {
+                    if (field.hiddenWhen === toggle.id) {
+                        fieldWraps[field.id].classList.toggle('is-hidden', checkbox.checked);
+                    }
+                });
+                refreshNextLabel();
+            });
+        });
+
+        refreshNextLabel();
         nextButton.addEventListener('click', () => {
             for (const dateField of dateFields) {
                 const validation = dateField.validate();
@@ -2624,11 +3093,90 @@ class App {
                 alert('양도가액을 입력해주세요.');
                 return;
             }
+            const missing = fields.find((field) => field.required && !isFieldHidden(field) && !this.inputs[field.id]);
+            if (missing) {
+                alert(`${missing.label}을(를) 입력해주세요.`);
+                return;
+            }
             this.nextStep();
         });
 
         this.bindAdvanceOnEnter(enterFields, nextButton);
 
+        wrapper.appendChild(nextButton);
+        container.appendChild(wrapper);
+    }
+
+    /** 전입일·전출일(또는 '산 적 없음')을 받아 residencyPeriod(년)를 계산한다. */
+    renderResidencyDates(container, question) {
+        const wrapper = document.createElement('div');
+        wrapper.className = 'stack';
+
+        const moveIn = this.createDateSelectorField(
+            { id: 'moveInDate', label: '들어와 살기 시작한 날 (전입일)', validationLabel: '전입일' },
+            { required: false, showHelper: false }
+        );
+        const moveOut = this.createDateSelectorField(
+            { id: 'moveOutDate', label: '나간 날 (전출일). 아직 살고 있으면 비워두세요', validationLabel: '전출일' },
+            { required: false, showHelper: false }
+        );
+
+        const neverRow = document.createElement('label');
+        neverRow.className = 'checklist-item toggle-row';
+        const neverBox = document.createElement('input');
+        neverBox.type = 'checkbox';
+        neverBox.checked = Boolean(this.inputs.neverLived);
+        const neverText = document.createElement('span');
+        neverText.textContent = '이 집에 산 적이 없어요';
+        neverRow.appendChild(neverBox);
+        neverRow.appendChild(neverText);
+
+        const applyNever = () => {
+            moveIn.element.classList.toggle('is-hidden', neverBox.checked);
+            moveOut.element.classList.toggle('is-hidden', neverBox.checked);
+        };
+        neverBox.addEventListener('change', () => {
+            this.inputs.neverLived = neverBox.checked;
+            applyNever();
+        });
+        applyNever();
+
+        const nextButton = document.createElement('button');
+        nextButton.className = 'btn-primary large';
+        const visibleNow = this.getCurrentQuestions();
+        const isLastStep = visibleNow.length > 0 && visibleNow[visibleNow.length - 1].id === this.cursorId;
+        nextButton.textContent = isLastStep ? '결과 보기' : '다음';
+        nextButton.addEventListener('click', () => {
+            if (this.inputs.neverLived) {
+                this.inputs.moveInDate = '';
+                this.inputs.moveOutDate = '';
+            } else {
+                for (const field of [moveIn, moveOut]) {
+                    const validation = field.validate();
+                    if (!validation.ok) {
+                        alert(validation.message);
+                        validation.input?.focus();
+                        return;
+                    }
+                }
+                if (!this.inputs.moveInDate) {
+                    alert('들어와 살기 시작한 날을 입력하거나 "이 집에 산 적이 없어요"를 선택해주세요.');
+                    return;
+                }
+                if (this.inputs.moveOutDate && this.inputs.moveOutDate < this.inputs.moveInDate) {
+                    alert('나간 날은 들어와 산 날보다 뒤여야 합니다.');
+                    return;
+                }
+            }
+            this.inputs.residencyPeriod = this.computeResidencyYears(this.inputs);
+            this.nextStep();
+        });
+
+        this.bindAdvanceOnEnter([moveIn.enterInput, moveOut.enterInput], nextButton);
+
+        wrapper.appendChild(neverRow);
+        wrapper.appendChild(moveIn.element);
+        wrapper.appendChild(moveOut.element);
         wrapper.appendChild(nextButton);
         container.appendChild(wrapper);
     }
@@ -2669,10 +3217,16 @@ class App {
             return;
         }
 
+        if (this.mode === 'detailed' && this.detailedEntry) {
+            this.returnToSimple();
+            return;
+        }
+
         this.showScreen(this.introScreen);
     }
 
-    calculateAndShowResult() {
+    /** 세부 입력칸(취득세·중개수수료 등)을 계산기가 쓰는 합계 항목으로 모은다. */
+    finalizeAmounts() {
         if (this.inputs.assetCategory !== 'stock' && this.inputs.acquisitionMethod === 'real') {
             // 조합원입주권: paidClearanceAmount는 calculator에서 별도 공제하므로 acquisitionPrice에 미포함
             this.inputs.acquisitionPrice =
@@ -2686,7 +3240,10 @@ class App {
                 + (this.inputs.sellTaxFee || 0)
                 + (this.inputs.capitalExpenditure || 0);
         }
+    }
 
+    calculateAndShowResult() {
+        this.finalizeAmounts();
         const result = this.calculator.calculate(this.inputs);
         this.renderResult(result);
         this.showScreen(this.resultScreen);
@@ -3333,6 +3890,9 @@ class App {
     reset() {
         this.inputs = this.getInitialInputs();
         this.lastResult = null;
+        this.mode = 'simple';
+        this.skipQuestionIds = new Set();
+        this.detailedEntry = null;
         this.currentPhase = 1;
         this.cursorId = null;
         this.updatePhaseIndicator();

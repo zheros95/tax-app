@@ -225,7 +225,9 @@ const walk = (answers) => {
     app.currentPhase = 1;
     app.cursorId = null;
     app.inputs = app.getInitialInputs();
-    app.phases = app.buildPhases();
+    app.mode = 'detailed';            // 이 절은 상세 흐름(buildPhases)의 커서 이동을 검증한다
+    app.skipQuestionIds = new Set();
+    app.detailedPhases = app.buildPhases();
     const seen = [];
     for (let guard = 0; guard < 300; guard += 1) {
         app.syncAutoDetectedRegion();

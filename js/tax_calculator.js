@@ -352,6 +352,7 @@ class TaxCalculator {
             totalTax,
             persons,
             isHeavyTaxApplicable: heavyTaxInfo.isApplicable,
+            heavyTaxGraceMonths: heavyTaxInfo.graceMonths || 0, // 중과 유예 예외가 실제 적용된 경우의 기한(4·6개월)
             heavyTaxTotalTax: totalTax,
             normalTotalTax,
             hypotheticalHeavyTax,
@@ -1521,7 +1522,8 @@ class TaxCalculator {
         }
 
         // ── 신규지정 조정대상지역 6개월 유예 적용 안내 ──
-        if (inputs.isNewlyDesignatedArea === 'yes') {
+        // 주소 자동판별로 플래그만 섰을 뿐인 1주택자에게는 띄우지 않는다. 유예 예외 6개월이 실제로 적용됐을 때만 안내한다.
+        if (result.heavyTaxGraceMonths === 6) {
             cautions.push('2025년 10월 16일 새로 지정된 조정대상지역으로 보아, 다주택 중과 유예 예외 기한을 계약일부터 6개월(2026년 11월 9일까지)로 적용했습니다. 계약금 수령일과 잔금일을 증빙으로 확인하세요.');
         }
 

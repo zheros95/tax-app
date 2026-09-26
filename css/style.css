@@ -1542,3 +1542,35 @@ body {
         animation: none;
     }
 }
+
+/* ── 간편 흐름 UI ── */
+.intro-secondary {
+    margin-top: 4px;
+    padding: 6px 4px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.9rem;
+    color: rgba(244, 236, 224, 0.72);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+    transition: color 0.2s ease;
+}
+
+.intro-secondary:hover {
+    color: #fff;
+}
+
+.toggle-row {
+    cursor: pointer;
+    user-select: none;
+}
+
+.toggle-hint {
+    margin: -6px 0 0 4px;
+}
+
+.is-hidden {
+    display: none !important;
+}
