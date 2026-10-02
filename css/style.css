@@ -1909,3 +1909,28 @@ body {
         width: 100%;
     }
 }
+
+/* ── 진행 이어하기 ── */
+.intro-resume {
+    padding: 10px 18px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 214, 166, 0.45);
+    background: rgba(255, 214, 166, 0.12);
+    color: #ffd6a6;
+    font: inherit;
+    font-size: 0.92rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.2s ease;
+}
+
+.intro-resume:hover {
+    background: rgba(255, 214, 166, 0.22);
+}
+
+@media (max-width: 540px) {
+    .intro-resume {
+        padding: 8px 14px;
+        font-size: 0.84rem;
+    }
+}

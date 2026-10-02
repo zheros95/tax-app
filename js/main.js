@@ -6,6 +6,10 @@
 /** 마법사 커서가 현재 단계의 마지막 질문을 지났음을 나타내는 값 */
 const END_OF_PHASE = '__end_of_phase__';
 
+/** 진행 저장: 이 기기 브라우저(localStorage)에만 남는다. 구조를 바꾸면 키 버전을 올린다. */
+const PROGRESS_KEY = 'yangdo-progress-v1';
+const PROGRESS_MAX_AGE_DAYS = 30;
+
 class App {
     constructor() {
         this.calculator = new TaxCalculator();
@@ -2103,6 +2107,12 @@ class App {
         document.getElementById('prev-btn')?.addEventListener('click', () => this.prevStep());
         document.getElementById('restart-btn')?.addEventListener('click', () => this.reset());
         document.getElementById('restart-bouncer-btn')?.addEventListener('click', () => this.reset());
+        document.getElementById('resume-btn')?.addEventListener('click', () => this.resumeProgress());
+        // 입력하다 만 칸도 남도록 앱을 닫거나 다른 앱으로 넘어갈 때 저장한다
+        window.addEventListener('pagehide', () => this.saveProgress());
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') this.saveProgress();
+        });
         document.getElementById('details-toggle-btn')?.addEventListener('click', () => this.toggleResultDetails());
         document.getElementById('brief-filing-btn')?.addEventListener('click', () => this.showFilingValues());
         document.getElementById('hometax-copy-all')?.addEventListener('click', () => this.copyHometaxGuide());
@@ -2112,6 +2122,7 @@ class App {
 
         this.updatePhaseIndicator();
         this.updateWizardMeta(-1, 0);
+        this.renderResumeOffer();
     }
 
     startWizard(mode = 'simple') {
@@ -2368,6 +2379,7 @@ class App {
         }
 
         this.cursorId = question.id;
+        this.saveProgress();
         const stepIndex = effectiveQuestions.indexOf(question);
         this.updateWizardMeta(stepIndex, effectiveQuestions.length);
 
@@ -3228,6 +3240,8 @@ class App {
             return;
         }
 
+        this.saveProgress();
+        this.renderResumeOffer();
         this.showScreen(this.introScreen);
     }
 
@@ -3253,6 +3267,105 @@ class App {
         const result = this.calculator.calculate(this.inputs);
         this.renderResult(result);
         this.showScreen(this.resultScreen);
+        this.saveProgress();
+    }
+
+    // ── 진행 저장 ──
+
+    progressStore() {
+        try {
+            return window.localStorage || null;
+        } catch (e) {
+            return null; // 사생활 보호 모드 등에서 접근이 막히면 저장 없이 동작
+        }
+    }
+
+    /** 질문 화면이나 결과 화면에 있을 때만 현재 상태를 저장한다. */
+    saveProgress() {
+        const store = this.progressStore();
+        if (!store) return;
+        const onWizard = this.wizardScreen && this.wizardScreen.classList.contains('active');
+        const onResult = this.resultScreen && this.resultScreen.classList.contains('active');
+        if (!onWizard && !onResult) return;
+        try {
+            store.setItem(PROGRESS_KEY, JSON.stringify({
+                savedAt: new Date().toISOString(),
+                atResult: Boolean(onResult),
+                mode: this.mode,
+                currentPhase: this.currentPhase,
+                cursorId: this.cursorId,
+                skipQuestionIds: Array.from(this.skipQuestionIds || []),
+                detailedEntry: this.detailedEntry,
+                inputs: this.inputs
+            }));
+        } catch (e) {
+            // 저장 공간 부족 등은 무시한다(계산에는 영향 없음)
+        }
+    }
+
+    loadProgress() {
+        const store = this.progressStore();
+        if (!store) return null;
+        try {
+            const data = JSON.parse(store.getItem(PROGRESS_KEY) || 'null');
+            if (!data || !data.inputs || !data.savedAt) return null;
+            const ageDays = (Date.now() - new Date(data.savedAt).getTime()) / 86400000;
+            if (!(ageDays >= 0 && ageDays <= PROGRESS_MAX_AGE_DAYS)) {
+                this.clearProgress();
+                return null;
+            }
+            return data;
+        } catch (e) {
+            this.clearProgress();
+            return null;
+        }
+    }
+
+    clearProgress() {
+        const store = this.progressStore();
+        if (!store) return;
+        try { store.removeItem(PROGRESS_KEY); } catch (e) { /* 무시 */ }
+    }
+
+    /** 첫 화면: 저장된 계산이 있으면 칩 자리에 '이어서 하기' 버튼을 보여준다. */
+    renderResumeOffer() {
+        const button = document.getElementById('resume-btn');
+        const chips = document.getElementById('intro-chips');
+        if (!button) return;
+        const data = this.loadProgress();
+        if (!data) {
+            button.classList.add('is-hidden');
+            if (chips) chips.classList.remove('is-hidden');
+            return;
+        }
+        const saved = new Date(data.savedAt);
+        const when = `${saved.getMonth() + 1}월 ${saved.getDate()}일`;
+        const what = data.atResult ? '계산 결과 다시 보기' : '하던 계산 이어서 하기';
+        button.textContent = `↻ ${when}에 ${what}`;
+        button.classList.remove('is-hidden');
+        if (chips) chips.classList.add('is-hidden');
+    }
+
+    resumeProgress() {
+        const data = this.loadProgress();
+        if (!data) {
+            this.renderResumeOffer();
+            return;
+        }
+        // 새 버전에서 추가된 입력 키는 기본값으로 채운다
+        this.inputs = { ...this.getInitialInputs(), ...data.inputs };
+        this.mode = data.mode === 'detailed' ? 'detailed' : 'simple';
+        this.skipQuestionIds = new Set(data.skipQuestionIds || []);
+        this.detailedEntry = data.detailedEntry || null;
+        this.currentPhase = [1, 2, 3].includes(data.currentPhase) ? data.currentPhase : 1;
+        this.cursorId = data.cursorId || null;
+
+        if (data.atResult) {
+            this.calculateAndShowResult();
+            return;
+        }
+        this.showScreen(this.wizardScreen);
+        this.renderQuestion();
     }
 
     renderResult(result) {
@@ -4340,6 +4453,8 @@ class App {
     }
 
     reset() {
+        // '처음부터 다시'는 저장된 진행도 지운다
+        this.clearProgress();
         this.inputs = this.getInitialInputs();
         this.lastResult = null;
         this.mode = 'simple';
@@ -4349,6 +4464,7 @@ class App {
         this.cursorId = null;
         this.updatePhaseIndicator();
         this.updateWizardMeta(-1, 0);
+        this.renderResumeOffer();
         this.showScreen(this.introScreen);
     }
 

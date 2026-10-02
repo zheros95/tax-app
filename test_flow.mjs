@@ -19,7 +19,15 @@ const document = {
     getElementById: () => makeEl(), querySelector: () => makeEl(), querySelectorAll: () => [],
     createElement: () => makeEl(), addEventListener() {}, body: makeEl()
 };
-const window = { document, addEventListener() {}, navigator: {} };
+const memoryStore = (() => {
+    const data = {};
+    return {
+        getItem: (k) => (k in data ? data[k] : null),
+        setItem: (k, v) => { data[k] = String(v); },
+        removeItem: (k) => { delete data[k]; }
+    };
+})();
+const window = { document, addEventListener() {}, navigator: {}, localStorage: memoryStore };
 const ctx = {
     window, document, console, navigator: {}, setTimeout, TextEncoder, TextDecoder,
     alert: (m) => { throw new Error('alert: ' + m); },
@@ -289,6 +297,49 @@ g = briefFor({ inputs: {
 }, residency: true });
 guide = app.buildHometaxGuide(g.res);
 check('홈택스: 환산취득가액 경로', findItem(guide, '계산 방법').value === '환산취득가액' && Boolean(findItem(guide, '개산공제')));
+
+// ── 10. 진행 저장·이어하기 ──
+const KEY = 'yangdo-progress-v1';
+const setActive = (screenName) => {
+    const on = (name) => ({ classList: { add() {}, remove() {}, toggle() {}, contains: (c) => c === 'active' && name === screenName } });
+    app.wizardScreen = on('wizard');
+    app.resultScreen = on('result');
+    app.introScreen = on('intro');
+};
+app.reset();
+setActive('intro');
+app.saveProgress();
+check('저장: 첫 화면에서는 저장 안 함', memoryStore.getItem(KEY) === null);
+
+startSimple(1);
+Object.assign(app.inputs, { address: '서울특별시 강남구 대치동 100', buyDate: '2019-03-02', transferPrice: 1500000000 });
+app.currentPhase = 2;
+app.cursorId = 'dates';
+setActive('wizard');
+app.saveProgress();
+check('저장: 질문 화면에서 저장됨', Boolean(memoryStore.getItem(KEY)));
+
+app.inputs = app.getInitialInputs();
+app.currentPhase = 1;
+app.cursorId = null;
+app.mode = 'detailed';
+app.resumeProgress();
+check('이어하기: 입력값 복원', app.inputs.address === '서울특별시 강남구 대치동 100' && app.inputs.transferPrice === 1500000000);
+check('이어하기: 단계·질문 위치 복원', app.mode === 'simple' && app.currentPhase === 2 && app.cursorId === 'dates', `${app.mode} ${app.currentPhase} ${app.cursorId}`);
+check('이어하기: 새 버전 입력 키는 기본값으로 채움', Array.isArray(app.inputs.simpleSituations) && 'moveInDate' in app.inputs);
+
+const saved = JSON.parse(memoryStore.getItem(KEY));
+saved.savedAt = new Date(Date.now() - 40 * 86400000).toISOString();
+memoryStore.setItem(KEY, JSON.stringify(saved));
+check('만료: 30일 지난 저장은 무시하고 삭제', app.loadProgress() === null && memoryStore.getItem(KEY) === null);
+
+memoryStore.setItem(KEY, '{깨진 json');
+check('손상: 깨진 저장값은 무시하고 삭제', app.loadProgress() === null && memoryStore.getItem(KEY) === null);
+
+setActive('wizard');
+app.saveProgress();
+app.reset();
+check('처음부터 다시: 저장 삭제', memoryStore.getItem(KEY) === null);
 
 console.log(`\n${pass} PASS / ${fail} FAIL`);
 process.exit(fail ? 1 : 0);

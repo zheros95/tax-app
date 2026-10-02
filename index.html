@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=20261002c">
+    <link rel="stylesheet" href="css/style.css?v=20261002d">
     
     <!-- PWA Settings -->
     <link rel="manifest" href="manifest.json">
@@ -39,7 +39,9 @@
                         쉬운 질문에 답만 하면 예상 세금과 신고서 초안까지 만들어 드립니다.
                     </p>
 
-                    <div class="intro-chips intro-anim d5">
+                    <button class="intro-resume intro-anim d5 is-hidden" id="resume-btn" type="button"></button>
+
+                    <div class="intro-chips intro-anim d5" id="intro-chips">
                         <span class="intro-chip">⏱️ 5분이면 충분</span>
                         <span class="intro-chip">📄 신고서 자동 작성</span>
                         <span class="intro-chip">🔒 설치 없이 무료</span>
@@ -228,10 +230,10 @@
         </section>
     </main>
 
-    <script src="js/region_data.js?v=20261002c"></script>
-    <script src="js/tax_calculator.js?v=20261002c"></script>
-    <script src="js/hwpx_form_filler.js?v=20261002c"></script>
-    <script src="js/main.js?v=20261002c"></script>
+    <script src="js/region_data.js?v=20261002d"></script>
+    <script src="js/tax_calculator.js?v=20261002d"></script>
+    <script src="js/hwpx_form_filler.js?v=20261002d"></script>
+    <script src="js/main.js?v=20261002d"></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
