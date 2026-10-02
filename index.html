@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=20261002b">
+    <link rel="stylesheet" href="css/style.css?v=20261002c">
     
     <!-- PWA Settings -->
     <link rel="manifest" href="manifest.json">
@@ -111,7 +111,7 @@
                         <p class="brief-text" id="brief-filing"></p>
                     </div>
                     <div class="brief-actions">
-                        <button class="btn-primary" id="brief-filing-btn" type="button">홈택스에 넣을 숫자 보기</button>
+                        <button class="btn-primary" id="brief-filing-btn" type="button">홈택스 입력 순서 보기</button>
                         <button class="btn-secondary" id="details-toggle-btn" type="button">계산 근거 자세히 보기</button>
                     </div>
                 </section>
@@ -119,6 +119,16 @@
                 <section class="info-section result-cautions" id="result-cautions-section" style="display:none;">
                     <h3>먼저 확인할 것</h3>
                     <ul class="bullet-list" id="caution-list"></ul>
+                </section>
+
+                <section class="info-section hometax-guide is-hidden" id="hometax-guide-section">
+                    <h3>홈택스 입력 순서</h3>
+                    <p class="hometax-intro" id="hometax-intro"></p>
+                    <ol class="hometax-steps" id="hometax-steps"></ol>
+                    <div class="hometax-actions">
+                        <button class="btn-secondary" id="hometax-copy-all" type="button">순서표 전체 복사</button>
+                        <button class="btn-secondary" id="hometax-download" type="button">TXT로 저장</button>
+                    </div>
                 </section>
 
                 <div id="result-details" class="result-details is-hidden">
@@ -218,10 +228,10 @@
         </section>
     </main>
 
-    <script src="js/region_data.js?v=20261002b"></script>
-    <script src="js/tax_calculator.js?v=20261002b"></script>
-    <script src="js/hwpx_form_filler.js?v=20261002b"></script>
-    <script src="js/main.js?v=20261002b"></script>
+    <script src="js/region_data.js?v=20261002c"></script>
+    <script src="js/tax_calculator.js?v=20261002c"></script>
+    <script src="js/hwpx_form_filler.js?v=20261002c"></script>
+    <script src="js/main.js?v=20261002c"></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {

@@ -2105,6 +2105,10 @@ class App {
         document.getElementById('restart-bouncer-btn')?.addEventListener('click', () => this.reset());
         document.getElementById('details-toggle-btn')?.addEventListener('click', () => this.toggleResultDetails());
         document.getElementById('brief-filing-btn')?.addEventListener('click', () => this.showFilingValues());
+        document.getElementById('hometax-copy-all')?.addEventListener('click', () => this.copyHometaxGuide());
+        document.getElementById('hometax-download')?.addEventListener('click', () => {
+            this.downloadTextFile('홈택스_입력순서.txt', this.hometaxGuideText(this.hometaxGuide));
+        });
 
         this.updatePhaseIndicator();
         this.updateWizardMeta(-1, 0);
@@ -3274,6 +3278,9 @@ class App {
         if (filingBtn) filingBtn.classList.toggle('is-hidden', !brief.needsFiling);
         // 상세 내용은 접어 두고, 필요한 사람만 펼쳐 본다
         this.setResultDetails(false);
+        this.hometaxGuide = brief.needsFiling ? this.buildHometaxGuide(result) : null;
+        this.renderHometaxGuide(this.hometaxGuide);
+        this.setHometaxGuide(false);
 
         document.getElementById('total-tax-display').textContent = fmt(result.totalTax);
         const breakdownDisplay = document.getElementById('tax-breakdown-display');
@@ -3466,12 +3473,306 @@ class App {
         this.setResultDetails(!this.resultDetailsOpen);
     }
 
-    /** 신고해야 하는 사람에게: 상세를 펼치고 서식 입력값 카드로 바로 이동한다. */
+    /** 신고해야 하는 사람에게: 홈택스 입력 순서표를 펼치고 그 위치로 이동한다. */
     showFilingValues() {
-        this.setResultDetails(true);
-        const card = document.getElementById('filing-guide-card');
-        if (card && typeof card.scrollIntoView === 'function') {
-            card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        const open = !this.hometaxGuideOpen;
+        this.setHometaxGuide(open);
+        const section = document.getElementById('hometax-guide-section');
+        if (open && section && typeof section.scrollIntoView === 'function') {
+            section.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+    }
+
+    setHometaxGuide(open) {
+        this.hometaxGuideOpen = Boolean(open && this.hometaxGuide);
+        const section = document.getElementById('hometax-guide-section');
+        const button = document.getElementById('brief-filing-btn');
+        if (section) section.classList.toggle('is-hidden', !this.hometaxGuideOpen);
+        if (button) button.textContent = this.hometaxGuideOpen ? '입력 순서 접기' : '홈택스 입력 순서 보기';
+    }
+
+    /**
+     * 홈택스 예정신고 화면 순서대로 '어느 칸에 무엇을 넣는지' 정리한다.
+     * 값은 계산기 결과를 그대로 쓰고, 앱이 모르는 값(양수인·면적 등)은 어디서 확인하는지 알려준다.
+     * 홈택스 메뉴 이름은 개편에 따라 바뀔 수 있어 화면 이름은 '찾을 곳' 수준으로만 적는다.
+     */
+    buildHometaxGuide(result) {
+        const inputs = this.inputs;
+        const calc = this.calculator;
+        const won = (v) => calc.formatCurrency(Math.floor(v || 0));
+        const raw = (v) => String(Math.max(0, Math.floor(v || 0)));
+        const date = (v) => calc.formatDate(v);
+        const item = (label, value, opts = {}) => ({ label, value, copy: opts.copy, hint: opts.hint || '' });
+        const isStock = inputs.type === 'stock';
+        const isHouse = inputs.type === 'house';
+        const isRight = inputs.type === 'right';
+        const due = calc.getFilingDueDate(inputs);
+        const dueLabel = due ? `${due.getFullYear()}년 ${due.getMonth() + 1}월 ${due.getDate()}일` : '';
+        const steps = [];
+
+        // 1. 메뉴
+        steps.push({
+            title: '홈택스에 로그인하고 양도소득세 예정신고로 들어가요',
+            desc: isStock
+                ? '홈택스(hometax.go.kr)나 손택스 앱에서 세금신고 → 양도소득세 → 예정신고로 들어가 주식등 신고를 고르세요.'
+                : '홈택스(hometax.go.kr)나 손택스 앱에서 세금신고 → 양도소득세 → 예정신고로 들어가세요. 부동산 1건이면 간편신고를 고르면 돼요.',
+            items: [],
+            note: '메뉴 이름은 홈택스 개편에 따라 조금 다를 수 있어요. "양도소득세"와 "예정신고"를 찾으면 돼요.'
+        });
+
+        // 2. 신고인
+        const personItems = [item('이름·주민등록번호', '로그인하면 자동으로 채워져요')];
+        personItems.push(item('주소·휴대전화', '자동으로 채워진 값이 맞는지만 확인하세요'));
+        if (inputs.isJointOwnership) {
+            personItems.push(item('지분', '50% (공동명의는 두 사람이 각자 로그인해서 따로 신고해요)'));
+        }
+        steps.push({ title: '신고하는 사람 정보를 확인해요', items: personItems });
+
+        if (isStock) {
+            steps.push({
+                title: '판 주식 정보를 넣어요',
+                items: [
+                    item('종목 수', `${Math.max(1, inputs.stockItemCount)}종목`),
+                    item('양도일', date(inputs.sellDate)),
+                    item('취득일', date(inputs.buyDate)),
+                    item('양도가액', won(result.transferPrice), { copy: raw(result.transferPrice) }),
+                    item('취득가액', won(result.acquisitionCost), { copy: raw(result.acquisitionCost) }),
+                    item('필요경비 (증권거래세·수수료)', won(result.necessaryExpenses), { copy: raw(result.necessaryExpenses) })
+                ]
+            });
+        } else {
+            // 3. 자산
+            let assetKind = result.analysis.caseLabel;
+            if (isHouse) assetKind = result.isHighValue ? '고가주택 (12억 원 초과)' : '주택';
+            if (isRight) assetKind = inputs.rightType === 'ticket' ? '분양권' : '조합원입주권';
+            if (inputs.type === 'general') assetKind = inputs.otherAssetCategory === 'land' ? '토지' : '건물·토지 (상가 등)';
+
+            let acqCause = '매매';
+            if (inputs.acquiredByGift === 'yes') acqCause = '증여';
+            else if ((inputs.specialCases || []).includes('inherited') && inputs.inheritanceSaleType === 'inherited') acqCause = '상속';
+
+            steps.push({
+                title: '판 부동산 정보를 넣어요',
+                items: [
+                    item('소재지', inputs.address || '등기부등본의 주소', { copy: inputs.address || '', hint: '주소 검색으로 고르면 돼요' }),
+                    item('자산 종류', assetKind),
+                    item('양도일 (판 날)', date(inputs.sellDate)),
+                    item('취득일 (산 날)', date(inputs.buyDate)),
+                    item('양도 원인', '매매'),
+                    item('취득 원인', acqCause),
+                    item('면적', '등기부등본(등기사항전부증명서)에 적힌 면적을 넣으세요', { hint: '아파트는 전용면적과 대지권 면적' }),
+                    item('양수인 (산 사람) 이름·주민등록번호', '양도 매매계약서에서 확인하세요')
+                ]
+            });
+
+            // 4. 비과세·기간
+            if (isHouse) {
+                const ntItems = [];
+                if (result.isNonTaxable) {
+                    const kind = inputs.temp2House === 'yes' && inputs.effectiveHouseCount === 2 ? '일시적 2주택 비과세' : '1세대 1주택 비과세';
+                    ntItems.push(item('비과세 해당 여부', `예, ${kind}`));
+                    if (result.isHighValue) ntItems.push(item('고가주택', '예. 12억 원 초과분만 과세돼요'));
+                } else {
+                    ntItems.push(item('비과세 해당 여부', '아니오 (과세)'));
+                }
+                ntItems.push(item('보유기간', calc.formatYears(inputs.holdingPeriod)));
+                if (inputs.residencyPeriod > 0 || result.isHighValue) {
+                    ntItems.push(item('거주기간', calc.formatYears(inputs.residencyPeriod), { hint: '주민등록초본의 전입·전출일 기준' }));
+                }
+                if (inputs.temp2House === 'yes' && inputs.newHomeContractDate) {
+                    ntItems.push(item('새로 산 집 취득일', date(inputs.newHomeContractDate)));
+                }
+                steps.push({ title: '비과세와 보유·거주 기간을 넣어요', items: ntItems });
+            }
+
+            // 5. 금액
+            const amountItems = [];
+            amountItems.push(item('양도가액', won(result.transferPrice), { copy: raw(result.transferPrice), hint: '양도 매매계약서 금액' }));
+            if (inputs.acquisitionMethod === 'estimated') {
+                amountItems.push(item('취득가액 계산 방법', '환산취득가액'));
+                amountItems.push(item('양도 당시 기준시가', won(inputs.transferTaxBase), { copy: raw(inputs.transferTaxBase) }));
+                amountItems.push(item('취득 당시 기준시가', won(inputs.acquisitionTaxBase), { copy: raw(inputs.acquisitionTaxBase) }));
+                amountItems.push(item('환산취득가액', won(result.acquisitionCost), { copy: raw(result.acquisitionCost), hint: '홈택스가 기준시가로 자동 계산하면 이 값과 같은지 확인' }));
+                amountItems.push(item('필요경비 (개산공제)', won(result.necessaryExpenses), { copy: raw(result.necessaryExpenses), hint: '취득 당시 기준시가의 3%' }));
+            } else {
+                amountItems.push(item('취득가액 계산 방법', '실지거래가액'));
+                amountItems.push(item('취득가액 합계', won(result.acquisitionCost), { copy: raw(result.acquisitionCost) }));
+                const acqParts = [
+                    ['매입가액 (산 가격)', inputs.acqPrice_real],
+                    ['취득세·등기비용', inputs.acqTax],
+                    ['취득 중개수수료', inputs.acqBrokerFee],
+                    ['법무사 수수료', inputs.acqLegalFee]
+                ].filter(([, v]) => v > 0);
+                if (acqParts.length > 1) {
+                    acqParts.forEach(([label, v]) => amountItems.push(item(` └ ${label}`, won(v), { copy: raw(v) })));
+                }
+                amountItems.push(item('필요경비 합계', won(result.necessaryExpenses), { copy: raw(result.necessaryExpenses) }));
+                [
+                    ['양도 중개수수료', inputs.sellBrokerFee],
+                    ['신고대행 수수료', inputs.sellTaxFee],
+                    ['수리비 (자본적 지출)', inputs.capitalExpenditure]
+                ].filter(([, v]) => v > 0)
+                    .forEach(([label, v]) => amountItems.push(item(` └ ${label}`, won(v), { copy: raw(v) })));
+            }
+            steps.push({
+                title: '금액을 넣어요',
+                items: amountItems,
+                note: inputs.acquisitionMethod === 'estimated'
+                    ? ''
+                    : '취득가액 칸에서 세부 항목을 나눠 넣는 화면이 나오면 └ 표시 금액대로 넣으세요. 영수증·계산서가 있는 금액만 넣어야 해요.'
+            });
+        }
+
+        // 6. 홈택스가 계산한 값 맞춰보기
+        steps.push({
+            title: '홈택스가 계산한 값이 아래와 같은지 맞춰봐요',
+            items: [
+                item('양도차익', won(result.capitalGains)),
+                item('장기보유특별공제', won(result.longTermDeduction)),
+                item('양도소득 기본공제', won(result.basicDeductionTotal)),
+                item('과세표준', won(result.taxBaseTotal)),
+                item('세율', calc.getDisplayTaxRate(inputs, result)),
+                item('산출세액', won(result.calculatedTax))
+            ],
+            note: '다르게 나오면 앞 단계에서 날짜·금액·비과세 선택을 다시 확인하세요. 전자신고세액공제 등이 자동 반영되면 최종 세액이 조금 줄 수 있어요.'
+        });
+
+        // 7. 납부
+        const payItems = [item('납부할 세액 (양도소득세)', won(result.nationalTax), { copy: raw(result.nationalTax) })];
+        const installment = calc.getInstallmentTaxLabel(result.nationalTax);
+        if (installment !== '해당 없음') payItems.push(item('나눠 낼 수 있는 금액 (분납)', installment));
+        if (result.filingPenalty && result.filingPenalty.total > 0) {
+            payItems.push(item('가산세 (기한 경과)', won(result.filingPenalty.total), { hint: '납부할 세액에 포함된 금액' }));
+        }
+        steps.push({
+            title: '신고서를 제출하고 세금을 내요',
+            desc: `제출하면 접수증이 나와요. 이어서 계좌이체·카드·가상계좌로 납부하세요.${dueLabel ? ` 신고·납부 기한은 ${dueLabel}이에요.` : ''}`,
+            items: payItems
+        });
+
+        // 8. 지방소득세
+        steps.push({
+            title: '지방소득세를 따로 신고해요',
+            desc: '홈택스 신고를 마치면 위택스로 이어서 신고하는 버튼이 나와요. 안 보이면 위택스(wetax.go.kr)에서 직접 신고하면 돼요.',
+            items: [item('지방소득세 (양도소득분)', won(result.localTax), { copy: raw(result.localTax), hint: '양도소득세의 10%' })]
+        });
+
+        const intro = `${dueLabel ? `${dueLabel}까지 ` : ''}홈택스 화면 순서대로 정리했어요. 숫자 옆 "복사"를 누르면 홈택스 칸에 붙여넣을 수 있게 숫자만 복사돼요.`;
+        return { intro, steps };
+    }
+
+    renderHometaxGuide(guide) {
+        const list = document.getElementById('hometax-steps');
+        const intro = document.getElementById('hometax-intro');
+        if (!list) return;
+        list.innerHTML = '';
+        if (!guide) return;
+        if (intro) intro.textContent = guide.intro;
+
+        guide.steps.forEach((step) => {
+            const li = document.createElement('li');
+            li.className = 'hometax-step';
+
+            const title = document.createElement('strong');
+            title.className = 'hometax-step-title';
+            title.textContent = step.title;
+            li.appendChild(title);
+
+            if (step.desc) {
+                const desc = document.createElement('p');
+                desc.className = 'hometax-step-desc';
+                desc.textContent = step.desc;
+                li.appendChild(desc);
+            }
+
+            if (step.items.length) {
+                const table = document.createElement('div');
+                table.className = 'hometax-items';
+                step.items.forEach((it) => {
+                    const row = document.createElement('div');
+                    row.className = 'hometax-item';
+
+                    const label = document.createElement('span');
+                    label.className = 'hometax-item-label';
+                    label.textContent = it.label;
+                    row.appendChild(label);
+
+                    const valueWrap = document.createElement('span');
+                    valueWrap.className = 'hometax-item-value';
+                    const value = document.createElement('span');
+                    value.textContent = it.value;
+                    valueWrap.appendChild(value);
+                    if (it.hint) {
+                        const hint = document.createElement('small');
+                        hint.textContent = it.hint;
+                        valueWrap.appendChild(hint);
+                    }
+                    row.appendChild(valueWrap);
+
+                    if (it.copy) {
+                        const btn = document.createElement('button');
+                        btn.type = 'button';
+                        btn.className = 'hometax-copy';
+                        btn.textContent = '복사';
+                        btn.addEventListener('click', () => this.copyText(it.copy, btn));
+                        row.appendChild(btn);
+                    }
+                    table.appendChild(row);
+                });
+                li.appendChild(table);
+            }
+
+            if (step.note) {
+                const note = document.createElement('p');
+                note.className = 'hometax-step-note';
+                note.textContent = step.note;
+                li.appendChild(note);
+            }
+            list.appendChild(li);
+        });
+    }
+
+    hometaxGuideText(guide) {
+        if (!guide) return '';
+        const lines = ['[홈택스 입력 순서]', guide.intro, ''];
+        guide.steps.forEach((step, i) => {
+            lines.push(`${i + 1}. ${step.title}`);
+            if (step.desc) lines.push(`   ${step.desc}`);
+            step.items.forEach((it) => lines.push(`   - ${it.label.trim()}: ${it.value}${it.hint ? ` (${it.hint})` : ''}`));
+            if (step.note) lines.push(`   ※ ${step.note}`);
+            lines.push('');
+        });
+        lines.push('참고용 계산이며, 실제 세금은 계약서·사실관계에 따라 달라질 수 있어요.');
+        return lines.join('\n');
+    }
+
+    copyHometaxGuide() {
+        this.copyText(this.hometaxGuideText(this.hometaxGuide), document.getElementById('hometax-copy-all'));
+    }
+
+    /** 클립보드 복사. 지원하지 않는 브라우저는 임시 textarea로 복사한다. */
+    copyText(text, button) {
+        const done = () => {
+            if (!button) return;
+            const original = button.textContent;
+            button.textContent = '복사됨';
+            setTimeout(() => { button.textContent = original; }, 1200);
+        };
+        const fallback = () => {
+            const area = document.createElement('textarea');
+            area.value = text;
+            area.setAttribute('readonly', '');
+            area.style.position = 'fixed';
+            area.style.opacity = '0';
+            document.body.appendChild(area);
+            area.select();
+            try { document.execCommand('copy'); done(); } catch (e) { alert('복사하지 못했어요. 직접 선택해서 복사해주세요.'); }
+            document.body.removeChild(area);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(done).catch(fallback);
+        } else {
+            fallback();
         }
     }
 

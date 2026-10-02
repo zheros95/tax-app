@@ -257,5 +257,38 @@ b = briefFor({ inputs: {
 }, residency: true });
 check('요약: 기한 경과 → 가산세 안내', b.res.filingPenalty.daysLate > 0 && b.brief.filing.includes('가산세') && b.brief.taxSub.includes('가산세'), b.brief.filing);
 
+// ── 9. 홈택스 입력 순서표 ──
+const findItem = (guide, label) => guide.steps.flatMap((st) => st.items).find((it) => it.label.includes(label));
+let g = briefFor({ inputs: {
+    address: '서울특별시 강남구 대치동 100', buyDate: '2019-03-02', sellDate: '2026-09-01', holdingPeriod: 7.5,
+    isJointOwnership: false, transferPrice: 1500000000, acqPrice_real: 900000000, acqTax: 30000000, sellBrokerFee: 6000000,
+    moveInDate: '2019-03-02', moveOutDate: '2020-06-01'
+}, residency: true });
+let guide = app.buildHometaxGuide(g.res);
+check('홈택스: 8단계', guide.steps.length === 8, String(guide.steps.length));
+check('홈택스: 양도가액 복사값은 숫자만', findItem(guide, '양도가액').copy === '1500000000', findItem(guide, '양도가액').copy);
+check('홈택스: 취득가액 합계 = 계산기 취득가액', findItem(guide, '취득가액 합계').copy === String(g.res.acquisitionCost));
+check('홈택스: 취득세 세부 항목 표시', Boolean(findItem(guide, '취득세')));
+check('홈택스: 납부할 세액 = 국세', findItem(guide, '납부할 세액').copy === String(g.res.nationalTax));
+check('홈택스: 지방소득세 단계', findItem(guide, '지방소득세').copy === String(g.res.localTax));
+check('홈택스: 과세 → 비과세 해당 아니오', findItem(guide, '비과세 해당 여부').value.startsWith('아니오'));
+check('홈택스: 분납 안내(1천만 초과)', Boolean(findItem(guide, '분납')), JSON.stringify(g.res.nationalTax));
+
+g = briefFor({ inputs: {
+    address: '서울특별시 강남구 대치동 100', buyDate: '2015-03-02', sellDate: '2026-09-01', holdingPeriod: 11.5,
+    isJointOwnership: true, transferPrice: 1500000000, acqPrice_real: 900000000, moveInDate: '2015-03-02'
+}, residency: true });
+guide = app.buildHometaxGuide(g.res);
+check('홈택스: 고가주택 자산 종류', findItem(guide, '자산 종류').value.includes('고가주택'));
+check('홈택스: 공동명의 지분 안내', findItem(guide, '지분').value.includes('50%'));
+
+g = briefFor({ inputs: {
+    address: '부산광역시 해운대구 우동 1', buyDate: '2005-03-02', sellDate: '2026-09-01', holdingPeriod: 21.5,
+    isJointOwnership: false, transferPrice: 1500000000, acquisitionMethod: 'estimated', acqPriceUnknown: true,
+    transferTaxBase: 900000000, acquisitionTaxBase: 300000000, moveInDate: '2005-03-02'
+}, residency: true });
+guide = app.buildHometaxGuide(g.res);
+check('홈택스: 환산취득가액 경로', findItem(guide, '계산 방법').value === '환산취득가액' && Boolean(findItem(guide, '개산공제')));
+
 console.log(`\n${pass} PASS / ${fail} FAIL`);
 process.exit(fail ? 1 : 0);
