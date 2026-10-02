@@ -1544,23 +1544,6 @@ body {
 }
 
 /* ── 간편 흐름 UI ── */
-.intro-secondary {
-    margin-top: 4px;
-    padding: 6px 4px;
-    background: none;
-    border: none;
-    cursor: pointer;
-    font: inherit;
-    font-size: 0.9rem;
-    color: rgba(244, 236, 224, 0.72);
-    text-decoration: underline;
-    text-underline-offset: 4px;
-    transition: color 0.2s ease;
-}
-
-.intro-secondary:hover {
-    color: #fff;
-}
 
 .toggle-row {
     cursor: pointer;
@@ -1725,12 +1708,6 @@ body {
         padding: 15px 22px;
     }
 
-    .intro-secondary {
-        margin-top: 0;
-        padding: 2px 4px;
-        font-size: 0.84rem;
-        line-height: 1.5;
-    }
 
     .intro-disclaimer {
         margin: 0;
@@ -1932,5 +1909,54 @@ body {
     .intro-resume {
         padding: 8px 14px;
         font-size: 0.84rem;
+    }
+}
+
+/* ── 첫 화면 입구 두 개: 주택(간편) / 그 밖의 자산(상세) ── */
+.intro-start {
+    width: 100%;
+    display: grid;
+    justify-items: center;
+    gap: 8px;
+}
+
+.intro-cta-caption {
+    color: rgba(244, 236, 224, 0.62);
+    font-size: 0.82rem;
+}
+
+.intro-other {
+    width: 100%;
+    max-width: 340px;
+    word-break: keep-all;
+    padding: 13px 20px;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.06);
+    color: #f4ece0;
+    font: inherit;
+    font-size: 0.95rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.intro-other:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.4);
+}
+
+@media (max-width: 540px) {
+    .intro-start {
+        gap: 6px;
+    }
+
+    .intro-cta-caption {
+        font-size: 0.76rem;
+    }
+
+    .intro-other {
+        padding: 11px 16px;
+        font-size: 0.88rem;
     }
 }

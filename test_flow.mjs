@@ -143,13 +143,24 @@ app.switchToDetailed(route.presets, route.skip);
 ids = visibleIds();
 check('2채+상속 → 특례 분류·주택 수 질문부터', app.inputs.houseNonTaxableCategory === 'specialNonTaxable' && ids[0] === 'houseCount', ids.slice(0, 3).join(','));
 
-startSimple(1);
-route = app.routeSimpleSituations(['not_house']);
-app.switchToDetailed(route.presets, route.skip);
+// 첫 화면 '상가·토지·분양권…' 버튼 → 상세 흐름, 주택 선택지 없음
+app.reset();
+app.startWizard('detailed', 'other');
 ids = visibleIds();
-check('집이 아님 → 상세 첫 질문 = 자산 종류', ids[0] === 'assetCategory', ids.slice(0, 3).join(','));
+const assetQ = app.detailedPhases[1].questions.find((q) => q.id === 'assetCategory');
+const assetValues = assetQ.options(app.inputs).map((o) => o.value);
+check('다른 자산 버튼 → 상세 첫 질문 = 자산 종류', ids[0] === 'assetCategory', ids.slice(0, 3).join(','));
+check('다른 자산 버튼 → 주택 선택지 숨김', !assetValues.includes('house') && assetValues.includes('right') && assetValues.includes('stock'), assetValues.join(','));
+app.reset();
+check('처음부터 다시 → 입구 초기화(주택 선택지 복귀)', assetQ.options(app.inputs).some((o) => o.value === 'house'));
+
+const simpleSituationQ = app.simplePhases[1].questions.find((q) => q.id === 'simpleSituations');
+check('간편 흐름 체크리스트에 "집이 아니에요" 없음', !simpleSituationQ.options(app.inputs).some((o) => o.value === 'not_house'));
 
 // 뒤로 가기: 상세 첫 화면에서 간편 흐름 복귀
+startSimple(1);
+route = app.routeSimpleSituations(['mixed_use']);
+app.switchToDetailed(route.presets, route.skip);
 app.returnToSimple();
 check('상세 첫 화면에서 뒤로 → 간편 흐름 복귀', app.mode === 'simple' && app.skipQuestionIds.size === 0);
 

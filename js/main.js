@@ -344,7 +344,7 @@ class App {
                 questions: [
                     {
                         id: 'assetCategory',
-                        title: '무엇을 양도하시나요?',
+                        title: () => (this.entry === 'other' ? '어떤 걸 파셨나요?' : '무엇을 양도하시나요?'),
                         subtitle: '가장 가까운 항목 하나를 고르면 질문 수가 줄어듭니다.',
                         helper: 'PDF에서도 자산 종류에 따라 비과세 판정, 세율, 공제 방식이 달라집니다.',
                         type: 'button',
@@ -380,7 +380,8 @@ class App {
                             }
                         },
 
-                        options: [
+                        // 첫 화면 '상가·토지·분양권…' 버튼으로 들어오면 주택은 빼고 보여준다(주택은 간편 흐름 담당)
+                        options: () => [
                             {
                                 label: '주택',
                                 detail: '아파트, 빌라, 단독주택',
@@ -405,7 +406,7 @@ class App {
                                 value: 'stock',
                                 icon: '주'
                             }
-                        ]
+                        ].filter((opt) => this.entry !== 'other' || opt.value !== 'house')
                     },
                     {
                         id: 'wasFormerMembershipRight',
@@ -1790,7 +1791,6 @@ class App {
                         options: (inputs) => {
                             const two = inputs.temp2House === 'yes';
                             const list = [
-                                { label: '파는 게 집이 아니에요 (상가·토지·분양권·입주권·주식)', value: 'not_house' },
                                 { label: '파는 집이 재개발·재건축으로 새로 받은 아파트예요', value: 'redevelopment' },
                                 {
                                     label: two
@@ -2014,16 +2014,6 @@ class App {
         }
         if (!values.some((v) => v !== 'overseas')) return null;
 
-        if (has('not_house')) {
-            return {
-                presets: {
-                    assetCategory: '', type: '', houseCount: null, effectiveHouseCount: null, heavyTaxHouseCount: null,
-                    houseTaxView: '', houseNonTaxableCategory: '', temp2House: 'no', newAssetType: '', specialCases: []
-                },
-                skip: []
-            };
-        }
-
         const skip = ['assetCategory', 'wasFormerMembershipRight', 'houseNonTaxableCategory'];
 
         if (has('redevelopment')) {
@@ -2103,7 +2093,7 @@ class App {
         };
 
         document.getElementById('start-btn')?.addEventListener('click', () => this.startWizard('simple'));
-        document.getElementById('start-detailed-btn')?.addEventListener('click', () => this.startWizard('detailed'));
+        document.getElementById('start-detailed-btn')?.addEventListener('click', () => this.startWizard('detailed', 'other'));
         document.getElementById('prev-btn')?.addEventListener('click', () => this.prevStep());
         document.getElementById('restart-btn')?.addEventListener('click', () => this.reset());
         document.getElementById('restart-bouncer-btn')?.addEventListener('click', () => this.reset());
@@ -2125,8 +2115,9 @@ class App {
         this.renderResumeOffer();
     }
 
-    startWizard(mode = 'simple') {
+    startWizard(mode = 'simple', entry = 'house') {
         this.mode = mode;
+        this.entry = entry; // 'house' | 'other' — 첫 화면에서 누른 버튼
         this.skipQuestionIds = new Set();
         this.detailedEntry = null;
         this.currentPhase = 1;
@@ -3292,6 +3283,7 @@ class App {
                 savedAt: new Date().toISOString(),
                 atResult: Boolean(onResult),
                 mode: this.mode,
+                entry: this.entry || 'house',
                 currentPhase: this.currentPhase,
                 cursorId: this.cursorId,
                 skipQuestionIds: Array.from(this.skipQuestionIds || []),
@@ -3355,6 +3347,7 @@ class App {
         // 새 버전에서 추가된 입력 키는 기본값으로 채운다
         this.inputs = { ...this.getInitialInputs(), ...data.inputs };
         this.mode = data.mode === 'detailed' ? 'detailed' : 'simple';
+        this.entry = data.entry === 'other' ? 'other' : 'house';
         this.skipQuestionIds = new Set(data.skipQuestionIds || []);
         this.detailedEntry = data.detailedEntry || null;
         this.currentPhase = [1, 2, 3].includes(data.currentPhase) ? data.currentPhase : 1;
@@ -4458,6 +4451,7 @@ class App {
         this.inputs = this.getInitialInputs();
         this.lastResult = null;
         this.mode = 'simple';
+        this.entry = 'house';
         this.skipQuestionIds = new Set();
         this.detailedEntry = null;
         this.currentPhase = 1;

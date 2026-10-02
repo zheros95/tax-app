@@ -8,7 +8,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="css/style.css?v=20261002d">
+    <link rel="stylesheet" href="css/style.css?v=20261002e">
     
     <!-- PWA Settings -->
     <link rel="manifest" href="manifest.json">
@@ -47,13 +47,16 @@
                         <span class="intro-chip">🔒 설치 없이 무료</span>
                     </div>
 
-                    <button class="intro-cta intro-anim d6" id="start-btn">
-                        <span>계산 시작하기</span>
-                        <span class="intro-cta-arrow">→</span>
-                    </button>
+                    <div class="intro-start intro-anim d6">
+                        <button class="intro-cta" id="start-btn" type="button">
+                            <span>집 판 세금 계산하기</span>
+                            <span class="intro-cta-arrow">→</span>
+                        </button>
+                        <span class="intro-cta-caption">아파트·빌라·단독주택·주거용 오피스텔</span>
+                    </div>
 
-                    <button class="intro-secondary intro-anim d7" id="start-detailed-btn" type="button">
-                        집이 아니라 상가·토지·분양권·주식을 파시나요? 상세 계산으로 바로 가기
+                    <button class="intro-other intro-anim d7" id="start-detailed-btn" type="button">
+                        상가·토지·분양권·입주권·주식은 여기로
                     </button>
 
                     <p class="intro-disclaimer intro-anim d7">
@@ -230,10 +233,10 @@
         </section>
     </main>
 
-    <script src="js/region_data.js?v=20261002d"></script>
-    <script src="js/tax_calculator.js?v=20261002d"></script>
-    <script src="js/hwpx_form_filler.js?v=20261002d"></script>
-    <script src="js/main.js?v=20261002d"></script>
+    <script src="js/region_data.js?v=20261002e"></script>
+    <script src="js/tax_calculator.js?v=20261002e"></script>
+    <script src="js/hwpx_form_filler.js?v=20261002e"></script>
+    <script src="js/main.js?v=20261002e"></script>
     <script>
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
